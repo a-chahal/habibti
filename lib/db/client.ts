@@ -2,9 +2,10 @@ import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
 import * as schema from "./schema";
 
-const connectionString = process.env.DATABASE_URL!;
+const connectionString = process.env.DATABASE_URL;
+if (!connectionString) throw new Error("DATABASE_URL environment variable is not set");
 
-// Disable prefetch for transaction support
+// prepare: false disables prepared statements (required for PgBouncer / pgx poolers)
 const client = postgres(connectionString, { prepare: false });
 export const db = drizzle(client, { schema });
 

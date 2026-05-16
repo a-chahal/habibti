@@ -8,6 +8,8 @@ export const CHANNELS = {
   BELIEF_UPDATED: "BELIEF_UPDATED",
   ALERT_CREATED: "ALERT_CREATED",
   DISPATCH_REQUESTED: "DISPATCH_REQUESTED",
+  SOURCING_COMPLETE: "SOURCING_COMPLETE",
+  SOURCING_OPTIONS_READY: "SOURCING_OPTIONS_READY",
 } as const;
 
 export type Channel = (typeof CHANNELS)[keyof typeof CHANNELS];
@@ -50,7 +52,19 @@ const DispatchRequestedPayload = z.object({
   dispatchId: z.string().uuid(),
   shipmentId: z.string().uuid(),
   agentName: z.string(),
-  payload: z.record(z.unknown()),
+  payload: z.record(z.string(), z.unknown()),
+});
+
+const SourcingCompletePayload = z.object({
+  shipmentId: z.string().uuid(),
+  agentNames: z.array(z.string()),
+  durationMs: z.number(),
+});
+
+const SourcingOptionsReadyPayload = z.object({
+  shipmentId: z.string().uuid(),
+  optionCount: z.number(),
+  topCountry: z.string(),
 });
 
 export type PayloadMap = {
@@ -60,6 +74,8 @@ export type PayloadMap = {
   BELIEF_UPDATED: z.infer<typeof BeliefUpdatedPayload>;
   ALERT_CREATED: z.infer<typeof AlertCreatedPayload>;
   DISPATCH_REQUESTED: z.infer<typeof DispatchRequestedPayload>;
+  SOURCING_COMPLETE: z.infer<typeof SourcingCompletePayload>;
+  SOURCING_OPTIONS_READY: z.infer<typeof SourcingOptionsReadyPayload>;
 };
 
 const payloadSchemas: { [K in Channel]: z.ZodTypeAny } = {
@@ -69,6 +85,8 @@ const payloadSchemas: { [K in Channel]: z.ZodTypeAny } = {
   BELIEF_UPDATED: BeliefUpdatedPayload,
   ALERT_CREATED: AlertCreatedPayload,
   DISPATCH_REQUESTED: DispatchRequestedPayload,
+  SOURCING_COMPLETE: SourcingCompletePayload,
+  SOURCING_OPTIONS_READY: SourcingOptionsReadyPayload,
 };
 
 const ee = new EventEmitter();

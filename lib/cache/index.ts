@@ -3,12 +3,12 @@ import { getCacheEntry, setCacheEntry, deleteCacheEntry, deleteExpiredCacheEntri
 
 const DEFAULT_TTL_SECONDS = 300; // 5 minutes
 
-const lru = new LRUCache<string, unknown>({
+const lru = new LRUCache<string, object>({
   max: 1000,
   ttl: DEFAULT_TTL_SECONDS * 1000,
 });
 
-async function get<T = unknown>(key: string): Promise<T | null> {
+async function get<T = object>(key: string): Promise<T | null> {
   const inMemory = lru.get(key);
   if (inMemory !== undefined) return inMemory as T;
 
@@ -17,14 +17,14 @@ async function get<T = unknown>(key: string): Promise<T | null> {
     if (!row) return null;
     const value = row.value as T;
     const ttlMs = row.expires_at.getTime() - Date.now();
-    if (ttlMs > 0) lru.set(key, value, { ttl: ttlMs });
+    if (ttlMs > 0 && value !== null && typeof value === "object") lru.set(key, value as object, { ttl: ttlMs });
     return value;
   } catch {
     return null;
   }
 }
 
-async function set(key: string, value: unknown, ttlSeconds = DEFAULT_TTL_SECONDS): Promise<void> {
+async function set(key: string, value: object, ttlSeconds = DEFAULT_TTL_SECONDS): Promise<void> {
   lru.set(key, value, { ttl: ttlSeconds * 1000 });
   try {
     const expiresAt = new Date(Date.now() + ttlSeconds * 1000);

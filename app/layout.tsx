@@ -1,8 +1,10 @@
 import type { Metadata } from "next";
 import localFont from "next/font/local";
 import "./globals.css";
-import { Geist } from "next/font/google";
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const { Geist } = require("next/font/google");
 import { cn } from "@/lib/utils";
+import "@/lib/boot";
 
 const geist = Geist({subsets:['latin'],variable:'--font-sans'});
 

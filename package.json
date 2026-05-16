@@ -13,7 +13,12 @@
     "db:push": "dotenv -e .env -- drizzle-kit push",
     "load-sanctions": "dotenv -e .env -- tsx scripts/load-sanctions.ts",
     "verify-sources": "dotenv -e .env -- tsx scripts/verify-sources.ts",
-    "test-echo": "dotenv -e .env -- tsx scripts/test-echo.ts"
+    "test-echo": "dotenv -e .env -- tsx scripts/test-echo.ts",
+    "test-intent-parsing": "dotenv -e .env -- tsx scripts/test-intent-parsing.ts",
+    "test-sourcing-agents": "dotenv -e .env -- tsx scripts/test-sourcing-agents.ts",
+    "test-full-sourcing": "dotenv -e .env -- tsx scripts/test-full-sourcing.ts",
+    "seed-scenarios": "dotenv -e .env -- tsx scripts/seed-scenarios.ts",
+    "test-synthesizer": "dotenv -e .env -- tsx scripts/test-synthesizer.ts"
   },
   "dependencies": {
     "@base-ui/react": "^1.4.1",
@@ -30,12 +35,13 @@
     "lru-cache": "^11.3.6",
     "lucide-react": "^1.16.0",
     "maplibre-gl": "^5.24.0",
-    "next": "14.2.35",
+    "next": "^14.2.35",
     "openai": "^6.38.0",
     "pg": "^8.20.0",
     "postgres": "^3.4.9",
     "react": "^18",
     "react-dom": "^18",
+    "server-only": "^0.0.1",
     "shadcn": "^4.7.0",
     "shadcn-ui": "^0.9.5",
     "tailwind-merge": "^3.6.0",
@@ -52,6 +58,6 @@
     "eslint-config-next": "14.2.35",
     "postcss": "^8",
     "tailwindcss": "^3.4.1",
-    "typescript": "^5"
+    "typescript": "^5.9.3"
   }
 }

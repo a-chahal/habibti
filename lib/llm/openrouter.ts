@@ -1,4 +1,24 @@
 const BASE_URL = "https://openrouter.ai/api/v1/chat/completions";
+
+// Strip markdown code fences that models sometimes add despite response_format: json_object
+// Also handles truncated (unclosed) fenced blocks — strip opening fence, keep content as-is
+function stripFences(content: string): string {
+  const trimmed = content.trim();
+  if (trimmed.startsWith("```")) {
+    const firstNewline = trimmed.indexOf("\n");
+    if (firstNewline !== -1) {
+      const lastFence = trimmed.lastIndexOf("```");
+      if (lastFence > firstNewline) {
+        // Complete fenced block — strip both fences
+        return trimmed.slice(firstNewline + 1, lastFence).trim();
+      } else {
+        // Truncated block (no closing fence) — strip only opening fence line
+        return trimmed.slice(firstNewline + 1).trim();
+      }
+    }
+  }
+  return trimmed;
+}
 const TIMEOUT_MS = 60_000;
 
 const MODELS = {
@@ -87,7 +107,7 @@ async function call(
   }
 
   const data: OpenRouterResponse = await res.json();
-  const content = data.choices[0]?.message?.content ?? "";
+  const raw = data.choices[0]?.message?.content ?? "";
 
   // Log token usage + estimated cost
   if (data.usage) {
@@ -99,6 +119,9 @@ async function call(
       `[LLM] ${model} | in=${data.usage.prompt_tokens} out=${data.usage.completion_tokens} | ~$${cost.toFixed(6)}`
     );
   }
+
+  // Strip markdown code fences that some models add despite json_object mode
+  const content = stripFences(raw);
 
   // Retry once on JSON parse failure when json mode requested
   if (opts.json && attempt === 0) {

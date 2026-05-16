@@ -19,6 +19,7 @@ export const shipmentStatusEnum = pgEnum("shipment_status", [
   "delayed",
   "arrived",
   "cancelled",
+  "sourcing_complete",
 ]);
 
 export const verificationStatusEnum = pgEnum("verification_status", [
