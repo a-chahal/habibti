@@ -1,0 +1,125 @@
+const BASE_URL = "https://openrouter.ai/api/v1/chat/completions";
+const TIMEOUT_MS = 60_000;
+
+const MODELS = {
+  opus: "anthropic/claude-opus-4-7",
+  sonnet: "anthropic/claude-sonnet-4-6",
+  mercury: "inception/mercury-2",
+} as const;
+
+// Rough cost per million tokens (input/output) in USD
+const COST_PER_M: Record<string, [number, number]> = {
+  "anthropic/claude-opus-4-7": [15, 75],
+  "anthropic/claude-sonnet-4-6": [3, 15],
+  "inception/mercury-2": [0.25, 1.25],
+};
+
+export interface Message {
+  role: "system" | "user" | "assistant";
+  content: string;
+}
+
+export interface CallOpts {
+  json?: boolean;
+  temperature?: number;
+  maxTokens?: number;
+}
+
+interface OpenRouterResponse {
+  id: string;
+  choices: { message: { content: string } }[];
+  usage?: { prompt_tokens: number; completion_tokens: number };
+}
+
+async function fetchWithTimeout(url: string, init: RequestInit): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
+  try {
+    return await fetch(url, { ...init, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function call(
+  model: string,
+  messages: Message[],
+  opts: CallOpts = {},
+  attempt = 0
+): Promise<string> {
+  const apiKey = process.env.OPENROUTER_API_KEY;
+  if (!apiKey) throw new Error("OPENROUTER_API_KEY not set");
+
+  const body: Record<string, unknown> = {
+    model,
+    messages,
+    temperature: opts.temperature ?? 0.3,
+    max_tokens: opts.maxTokens ?? 2048,
+  };
+  if (opts.json) body.response_format = { type: "json_object" };
+
+  let res: Response;
+  try {
+    res = await fetchWithTimeout(BASE_URL, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+        "HTTP-Referer": "https://habibti.trade",
+        "X-Title": "Habibti Trade Platform",
+      },
+      body: JSON.stringify(body),
+    });
+  } catch (err: any) {
+    if (attempt === 0 && (err.name === "AbortError" || err.message?.includes("timeout"))) {
+      return call(model, messages, opts, 1);
+    }
+    throw err;
+  }
+
+  if (res.status >= 500 && attempt === 0) {
+    return call(model, messages, opts, 1);
+  }
+
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`OpenRouter error ${res.status}: ${text}`);
+  }
+
+  const data: OpenRouterResponse = await res.json();
+  const content = data.choices[0]?.message?.content ?? "";
+
+  // Log token usage + estimated cost
+  if (data.usage) {
+    const [inCost, outCost] = COST_PER_M[model] ?? [0, 0];
+    const cost =
+      (data.usage.prompt_tokens / 1_000_000) * inCost +
+      (data.usage.completion_tokens / 1_000_000) * outCost;
+    console.log(
+      `[LLM] ${model} | in=${data.usage.prompt_tokens} out=${data.usage.completion_tokens} | ~$${cost.toFixed(6)}`
+    );
+  }
+
+  // Retry once on JSON parse failure when json mode requested
+  if (opts.json && attempt === 0) {
+    try {
+      JSON.parse(content);
+    } catch {
+      return call(model, messages, opts, 1);
+    }
+  }
+
+  return content;
+}
+
+export async function callOpus(messages: Message[], opts?: CallOpts) {
+  return call(MODELS.opus, messages, opts);
+}
+
+export async function callSonnet(messages: Message[], opts?: CallOpts) {
+  return call(MODELS.sonnet, messages, opts);
+}
+
+export async function callMercury(messages: Message[], opts?: CallOpts) {
+  return call(MODELS.mercury, messages, opts);
+}
