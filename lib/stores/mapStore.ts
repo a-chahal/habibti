@@ -8,7 +8,11 @@ interface MapState {
   activeArcId?: string;
   vesselPosition?: { lat: number; lng: number; heading?: number | null } | null;
   onArcClick?: (optionId: string, arcId: string) => void;
-  
+  // ─── Globe animation state ───────────────────────────────────────────────────
+  globeZoom: number;       // CSS scale applied to the fixed background div (1 = normal)
+  globeSpinBoost: number;  // Multiplier on the 0.003 base rotation speed (1 = normal)
+  // ────────────────────────────────────────────────────────────────────────────
+
   setMapState: (state: Partial<Omit<MapState, "setMapState" | "resetMapState">>) => void;
   resetMapState: () => void;
 }
@@ -20,6 +24,8 @@ export const useMapStore = create<MapState>((set) => ({
   activeArcId: undefined,
   vesselPosition: null,
   onArcClick: undefined,
+  globeZoom: 1,
+  globeSpinBoost: 1,
 
   setMapState: (state) => set((prev) => ({ ...prev, ...state })),
   resetMapState: () => set({
@@ -29,5 +35,7 @@ export const useMapStore = create<MapState>((set) => ({
     activeArcId: undefined,
     vesselPosition: null,
     onArcClick: undefined,
+    globeZoom: 1,
+    globeSpinBoost: 1,
   }),
 }));

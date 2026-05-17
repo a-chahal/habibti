@@ -3,6 +3,16 @@ import { useState, useEffect, useRef } from "react";
 import { useRouter } from "next/navigation";
 import { AnimatePresence, motion } from "framer-motion";
 import { Sparkles, HelpCircle, Check, Compass, ShieldAlert, ArrowRight, RotateCw, BookOpen, User } from "lucide-react";
+import { useMapStore } from "@/lib/stores/mapStore";
+
+// ─── ZOOM & SPIN CONFIG ────────────────────────────────────────────────────────
+// Globe zoom on load (1.0 = normal viewport, higher = more zoomed in)
+const INITIAL_GLOBE_ZOOM = 2.2;
+// Spin multiplier on button click (1 = normal, 6 = 6x faster)
+const GLOBE_SPIN_BOOST = 6;
+// How long (ms) until the lerp target resets to 1 (visual slowdown is gradual)
+const SPIN_DURATION_MS = 1800;
+// ──────────────────────────────────────────────────────────────────────────────
 
 const QUICK_INTENTS = [
   {
@@ -62,9 +72,11 @@ export default function HomePage() {
   const [refineStatus, setRefineStatus] = useState("");
 
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const { setMapState } = useMapStore();
 
   useEffect(() => {
     textareaRef.current?.focus();
+    setMapState({ globeZoom: INITIAL_GLOBE_ZOOM });
   }, []);
 
   const [shiningPillIndex, setShiningPillIndex] = useState<number>(0);
@@ -349,6 +361,10 @@ export default function HomePage() {
     const finalIntent = intent.trim();
     if (!finalIntent) return;
 
+    // Animate: zoom out + fast spin burst on submit
+    setMapState({ globeZoom: 1, globeSpinBoost: GLOBE_SPIN_BOOST });
+    setTimeout(() => setMapState({ globeSpinBoost: 1 }), SPIN_DURATION_MS);
+
     setSubmitting(true);
     setError(null);
     try {
@@ -362,6 +378,7 @@ export default function HomePage() {
       setExiting(true);
       setTimeout(() => router.push(`/shipment/${data.id}`), 400);
     } catch (err: any) {
+      setMapState({ globeZoom: INITIAL_GLOBE_ZOOM, globeSpinBoost: 1 });
       setError(err.message);
       setSubmitting(false);
     }
@@ -530,8 +547,8 @@ export default function HomePage() {
                           disabled={submitting || isRefining}
                           onClick={() => setIntent(q.intent)}
                           className={`px-5 py-2 rounded-full text-sm font-medium transition-all duration-200 disabled:opacity-30 ${isShining
-                              ? "border border-indigo-400/50 bg-indigo-500/10 text-indigo-200 shadow-[0_0_15px_rgba(99,102,241,0.2)] scale-105"
-                              : "border border-white/10 bg-white/5 text-white/70 hover:border-white/20 hover:bg-white/10 hover:text-white"
+                            ? "border border-indigo-400/50 bg-indigo-500/10 text-indigo-200 shadow-[0_0_15px_rgba(99,102,241,0.2)] scale-105"
+                            : "border border-white/10 bg-white/5 text-white/70 hover:border-white/20 hover:bg-white/10 hover:text-white"
                             }`}
                         >
                           {q.label}

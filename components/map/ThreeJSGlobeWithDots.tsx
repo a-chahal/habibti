@@ -4,6 +4,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import ConicPolygonGeometry from 'three-conic-polygon-geometry';
+import { useMapStore } from '@/lib/stores/mapStore';
 
 interface GeoJSONFeature {
   geometry: {
@@ -50,8 +51,22 @@ export default function ThreeJSGlobeWithDots({
 }: GlobeProps) {
   const onArcClickRef = useRef(onArcClick);
   useEffect(() => { onArcClickRef.current = onArcClick; }, [onArcClick]);
-  const mountRef = useRef<HTMLDivElement>(null);
+  const mountRef = useRef<HTMLDivElement | null>(null);
   const globeGroupRef = useRef<THREE.Group | null>(null);
+
+  // spinBoostRef  = target speed multiplier (driven by Zustand store)
+  // currentSpinRef = actual speed used in animate loop (lerps toward target)
+  // Reading via ref avoids re-mounting the Three.js scene on store changes.
+  const spinBoostRef = useRef<number>(1);
+  const currentSpinRef = useRef<number>(1);
+  useEffect(() => {
+    const unsub = useMapStore.subscribe((state) => {
+      spinBoostRef.current = state.globeSpinBoost;
+    });
+    spinBoostRef.current = useMapStore.getState().globeSpinBoost;
+    currentSpinRef.current = spinBoostRef.current;
+    return unsub;
+  }, []);
 
   useEffect(() => {
     if (!mountRef.current) return;
@@ -305,7 +320,12 @@ export default function ThreeJSGlobeWithDots({
       controls.update();
 
       if (autoRotate) {
-        globeGroup.rotation.y += 0.003;
+        // Lerp toward target: fast ramp-up (0.08), slow exponential ramp-down (0.012)
+        const spinTarget = spinBoostRef.current;
+        const lerpFactor = currentSpinRef.current < spinTarget ? 0.08 : 0.012;
+        currentSpinRef.current += (spinTarget - currentSpinRef.current) * lerpFactor;
+
+        globeGroup.rotation.y += 0.003 * currentSpinRef.current;
         // Elegant cosmic figure-8 tilting over two full horizontal rotation cycles (4 * Math.PI)
         const theta = globeGroup.rotation.y;
         const maxTilt = 0.15; // Subtle and extremely premium 8.5-degree wobble
