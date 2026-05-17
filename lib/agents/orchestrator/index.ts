@@ -1114,9 +1114,11 @@ export function registerAllAgents() {
   orchestrator.register("country-risk", (payload) =>
     new CountryRiskAgent().run(payload) as Promise<unknown>
   );
-  orchestrator.register("route-prescorer", (payload) =>
-    new RoutePrescorer().run(payload) as Promise<unknown>
-  );
+  // route-prescorer is legacy (replaced by route-planner + leg-analyzer).
+  // Intentionally NOT registered — left in tree for reference.
+  // orchestrator.register("route-prescorer", (payload) =>
+  //   new RoutePrescorer().run(payload) as Promise<unknown>
+  // );
   orchestrator.register("port-discoverer", (payload) =>
     new PortDiscovererAgent().run(payload) as Promise<unknown>
   );
@@ -1132,11 +1134,14 @@ export function registerAllAgents() {
   orchestrator.register("option-ranker", (payload) =>
     new OptionRankerAgent().run(payload) as Promise<unknown>
   );
-  orchestrator.register("feedback-loop", (payload) =>
-    new FeedbackLoopAgent().run(payload) as Promise<unknown>
-  );
+  // feedback-loop is dormant under the post-monitoring-pivot architecture.
+  // Leave the agent class in tree but do not register or start it.
+  // orchestrator.register("feedback-loop", (payload) =>
+  //   new FeedbackLoopAgent().run(payload) as Promise<unknown>
+  // );
 
-  // Synthesizer: event-driven, not dispatched via registry
-  const synthesizer = new SynthesizerAgent();
-  synthesizer.startListening();
+  // Synthesizer is dormant (subscribed to SIGNAL_NEW; we no longer want
+  // it firing during sourcing). Class kept for later re-enablement.
+  // const synthesizer = new SynthesizerAgent();
+  // synthesizer.startListening();
 }

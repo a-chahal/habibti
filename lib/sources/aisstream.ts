@@ -29,7 +29,22 @@ export function subscribeAIS(
 
   const ws = new WebSocket("wss://stream.aisstream.io/v0/stream");
 
+  // Inactivity watchdog: if the socket connects but stops emitting messages,
+  // close it after 30s so callers (e.g. waitForOnePositionReport) can fail fast
+  // and so we don't hold a dead connection indefinitely.
+  const IDLE_TIMEOUT_MS = 30_000;
+  let idleTimer: NodeJS.Timeout | null = null;
+  const armIdle = () => {
+    if (idleTimer) clearTimeout(idleTimer);
+    idleTimer = setTimeout(() => {
+      onError?.(new Error("AISStream idle timeout (no messages in 30s)"));
+      try { ws.close(); } catch { /* noop */ }
+    }, IDLE_TIMEOUT_MS);
+  };
+  armIdle();
+
   ws.on("open", () => {
+    armIdle();
     ws.send(
       JSON.stringify({
         APIKey: apiKey,
@@ -46,6 +61,7 @@ export function subscribeAIS(
   });
 
   ws.on("message", (raw: Buffer) => {
+    armIdle();
     try {
       const msg = JSON.parse(raw.toString());
       const pr = msg.Message?.PositionReport;
@@ -66,10 +82,18 @@ export function subscribeAIS(
   });
 
   ws.on("error", (err: Error) => {
+    if (idleTimer) clearTimeout(idleTimer);
     onError?.(err);
   });
 
-  return () => ws.close();
+  ws.on("close", () => {
+    if (idleTimer) clearTimeout(idleTimer);
+  });
+
+  return () => {
+    if (idleTimer) clearTimeout(idleTimer);
+    ws.close();
+  };
 }
 
 /**

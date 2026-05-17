@@ -538,12 +538,28 @@ export class SynthesizerAgent extends Agent {
   }
 
   private async synthesizeForShipment(shipmentId: string) {
-    const [shipment, allSignals, priorBelief, recentAlertsRaw] = await Promise.all([
+    // Bound the multi-DB read at 5s so a stalled query can't hang the synthesizer.
+    const dbReads = Promise.all([
       getShipment(shipmentId),
       getSignalsForShipment(shipmentId),
       getLatestBelief(shipmentId),
       listAlerts(shipmentId),
     ]);
+    let shipment: Awaited<ReturnType<typeof getShipment>>;
+    let allSignals: Awaited<ReturnType<typeof getSignalsForShipment>>;
+    let priorBelief: Awaited<ReturnType<typeof getLatestBelief>>;
+    let recentAlertsRaw: Awaited<ReturnType<typeof listAlerts>>;
+    try {
+      [shipment, allSignals, priorBelief, recentAlertsRaw] = await Promise.race([
+        dbReads,
+        new Promise<never>((_, rej) =>
+          setTimeout(() => rej(new Error("synthesizer DB read timed out after 5s")), 5000)
+        ),
+      ]);
+    } catch (err: any) {
+      console.error(`[synthesizer] DB timeout for ${shipmentId}:`, err.message);
+      return;
+    }
 
     if (!shipment) return;
 

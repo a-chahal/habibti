@@ -35,7 +35,7 @@ export async function searchNews(params: {
   if (params.startDate) url.searchParams.set("start_date", params.startDate);
   if (params.pageSize) url.searchParams.set("page_size", String(params.pageSize));
 
-  const res = await fetch(url.toString());
+  const res = await fetch(url.toString(), { signal: AbortSignal.timeout(8000) });
   if (!res.ok) throw new Error(`Currents API error ${res.status}: ${await res.text()}`);
 
   const json = await res.json();

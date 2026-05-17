@@ -33,11 +33,18 @@ export class FeedbackLoopAgent extends Agent {
       notes?: string;
     };
 
-    const [shipment, allSignals, options, beliefHistory] = await Promise.all([
+    // Bound the DB read at 5s so a stalled query can't hang feedback-loop.
+    const dbReads = Promise.all([
       getShipment(shipmentId),
       getSignalsForShipment(shipmentId),
       getOptionsForShipment(shipmentId),
       getBeliefHistory(shipmentId),
+    ]);
+    const [shipment, allSignals, options, beliefHistory] = await Promise.race([
+      dbReads,
+      new Promise<never>((_, rej) =>
+        setTimeout(() => rej(new Error("feedback-loop DB read timed out after 5s")), 5000)
+      ),
     ]);
 
     if (!shipment) throw new Error(`Shipment ${shipmentId} not found`);

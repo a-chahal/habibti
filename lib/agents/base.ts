@@ -25,11 +25,18 @@ export abstract class Agent {
     schema: z.ZodSchema<T>,
     opts?: CallOpts
   ): Promise<T> {
+    const t0 = Date.now();
     const raw = await this.callLLM(messages, { ...opts, json: true });
     try {
       return schema.parse(JSON.parse(raw));
-    } catch {
-      // Retry once on validation failure
+    } catch (err) {
+      // Skip the retry if we've already burned most of our 60s budget — prevents
+      // a worst-case ~180s compound when both first call and retry stall.
+      const elapsedMs = Date.now() - t0;
+      if (elapsedMs > 50_000) {
+        console.warn(`[Agent:${this.name}] skipping callLLMValidated retry (already ${elapsedMs}ms in)`);
+        throw err;
+      }
       const retry = await this.callLLM(messages, { ...opts, json: true });
       return schema.parse(JSON.parse(retry));
     }

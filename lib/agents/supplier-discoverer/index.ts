@@ -143,6 +143,7 @@ export class SupplierDiscovererAgent extends Agent {
         { web: true, maxTokens: 2500, temperature: 0.2 }
       );
 
+    const tStart = Date.now();
     let discovered: SupplierDiscovererOutput;
     try {
       discovered = await callOnce();
@@ -171,9 +172,12 @@ export class SupplierDiscovererAgent extends Agent {
       console.warn(`[supplier-discoverer] ${countryISO}: dropped ${dropped} suppliers from wrong country`);
     }
 
-    // Retry ONCE if the filtered list is empty — usually fixes a bad first search
-    if (discovered.suppliers.length === 0) {
-      console.warn(`[supplier-discoverer] ${countryISO}: empty result, retrying with stronger nudge`);
+    // Retry ONCE if the filtered list is empty — usually fixes a bad first search.
+    // Skip retry if we've already used most of our 30s dispatch budget so we
+    // don't compound a slow first call into a 60s+ stall.
+    const elapsedMs = Date.now() - tStart;
+    if (discovered.suppliers.length === 0 && elapsedMs < 20_000) {
+      console.warn(`[supplier-discoverer] ${countryISO}: empty result, retrying with stronger nudge (elapsed=${elapsedMs}ms)`);
       try {
         const retry = await callOnce(
           `\n\nIMPORTANT: Your previous attempt returned no usable ${countryFullName} suppliers. Search trade portals like ExportHub, TradeIndia, Alibaba (filter by ${countryFullName}), local chamber-of-commerce directories, or the official ${countryFullName} export promotion agency website. Return 4-6 real companies headquartered in ${countryFullName}.`
@@ -183,6 +187,8 @@ export class SupplierDiscovererAgent extends Agent {
       } catch (err: any) {
         console.error(`[supplier-discoverer] ${countryISO} retry failed:`, err.message);
       }
+    } else if (discovered.suppliers.length === 0) {
+      console.warn(`[supplier-discoverer] ${countryISO}: empty result but skipping retry (elapsed=${elapsedMs}ms)`);
     }
 
     // Cross-verify the TOP candidate against GLEIF for a "registry-verified" badge.
