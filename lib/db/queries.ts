@@ -1,4 +1,4 @@
-import { eq, desc, and, lt, sql, gte } from "drizzle-orm";
+import { eq, desc, and, lt, sql, gte, inArray } from "drizzle-orm";
 import { db } from "./client";
 import {
   shipments,
@@ -22,6 +22,20 @@ export async function getShipment(id: string) {
 
 export async function listShipments() {
   return db.query.shipments.findMany({ orderBy: desc(shipments.created_at) });
+}
+
+export async function listUnprocessedShipments() {
+  return db.query.shipments.findMany({
+    where: inArray(shipments.status, ["draft", "pending"]),
+    orderBy: desc(shipments.created_at),
+  });
+}
+
+export async function listConfirmedShipments() {
+  return db.query.shipments.findMany({
+    where: inArray(shipments.status, ["in_transit", "delayed"]),
+    orderBy: desc(shipments.created_at),
+  });
 }
 
 export async function createShipment(data: typeof shipments.$inferInsert) {

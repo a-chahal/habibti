@@ -1,5 +1,5 @@
 "use client";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState, useRef } from "react";
 import { useRouter } from "next/navigation";
 import dynamic from "next/dynamic";
 import { AnimatePresence, motion } from "framer-motion";
@@ -88,6 +88,34 @@ function TimelineBar({ progress }: { progress: number | null }) {
 
 // ─── Phase header ─────────────────────────────────────────────────────────────
 
+function ResetButton() {
+  const router = useRouter();
+  const [state, setState] = useState<"idle" | "busy" | "done">("idle");
+
+  const handleReset = async () => {
+    if (state === "busy") return;
+    setState("busy");
+    try {
+      await fetch("/api/reset", { method: "POST" });
+      setState("done");
+      setTimeout(() => router.replace("/"), 600);
+    } catch {
+      setState("idle");
+    }
+  };
+
+  return (
+    <button
+      onClick={handleReset}
+      disabled={state === "busy"}
+      className="text-[10px] font-mono text-white/15 hover:text-white/40 transition-colors disabled:opacity-30 ml-2"
+      title="Reset database and start over"
+    >
+      {state === "busy" ? "resetting…" : state === "done" ? "✓" : "reset db"}
+    </button>
+  );
+}
+
 function PhaseHeader({
   status,
   currentEta,
@@ -128,6 +156,7 @@ function PhaseHeader({
       <a href="/" className="text-[10px] font-mono text-white/20 hover:text-white/50 transition-colors">
         ← habibti
       </a>
+      <ResetButton />
       <div className="h-4 w-px bg-white/10" />
 
       <span className={`text-[10px] font-mono px-2 py-0.5 rounded tracking-wider ${

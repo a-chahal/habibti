@@ -7,6 +7,8 @@ import {
   createSignal,
   getOptionsForShipment,
   getSupplier,
+  listUnprocessedShipments,
+  listConfirmedShipments,
 } from "../../db/queries";
 import { IntentParserAgent } from "../intent-parser";
 import type { IntentOutput } from "../intent-parser";
@@ -92,6 +94,35 @@ class Orchestrator {
     subscribe("SIGNAL_NEW", (payload) => this.onSignalNew(payload));
 
     console.log("[Orchestrator] started, listening on SHIPMENT_NEW / SHIPMENT_CONFIRMED / SIGNAL_NEW");
+
+    // Catch up: pick up any draft/pending shipments that were created before this boot
+    // (handles dev hot-reload and server restarts that lose in-process events)
+    setImmediate(() => this.catchUpOnBoot());
+  }
+
+  private async catchUpOnBoot() {
+    try {
+      const unprocessed = await listUnprocessedShipments();
+      if (unprocessed.length > 0) {
+        console.log(`[Orchestrator] catch-up: ${unprocessed.length} unprocessed shipment(s) found`);
+        for (const s of unprocessed) {
+          this.onShipmentNew({ shipmentId: s.id }).catch((err) =>
+            console.error(`[Orchestrator] catch-up error for ${s.id}:`, err)
+          );
+        }
+      }
+      const confirmed = await listConfirmedShipments();
+      if (confirmed.length > 0) {
+        console.log(`[Orchestrator] catch-up: ${confirmed.length} in-transit shipment(s) found`);
+        for (const s of confirmed) {
+          this.startMonitoring(s.id, s.vessel_mmsi ?? undefined).catch((err) =>
+            console.error(`[Orchestrator] catch-up monitoring error for ${s.id}:`, err)
+          );
+        }
+      }
+    } catch (err) {
+      console.error("[Orchestrator] catch-up query failed:", err);
+    }
   }
 
   private async onShipmentNew(payload: PayloadMap["SHIPMENT_NEW"]) {

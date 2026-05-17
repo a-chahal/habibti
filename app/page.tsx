@@ -24,11 +24,30 @@ export default function HomePage() {
   const [submitting, setSubmitting] = useState(false);
   const [exiting, setExiting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [resetting, setResetting] = useState(false);
+  const [resetDone, setResetDone] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   useEffect(() => {
     textareaRef.current?.focus();
   }, []);
+
+  const handleReset = async () => {
+    setResetting(true);
+    setError(null);
+    try {
+      const res = await fetch("/api/reset", { method: "POST" });
+      if (!res.ok) throw new Error("Reset failed");
+      setResetDone(true);
+      setIntent("");
+      // Brief confirmation, then clear the done state
+      setTimeout(() => setResetDone(false), 2000);
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setResetting(false);
+    }
+  };
 
   const handleSubmit = async (intentText?: string) => {
     const text = (intentText ?? intent).trim();
@@ -154,6 +173,22 @@ export default function HomePage() {
             >
               ⌘ + Enter to submit
             </motion.p>
+
+            {/* Reset button */}
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              transition={{ delay: 0.7, duration: 0.5 }}
+              className="mt-10 flex justify-center"
+            >
+              <button
+                onClick={handleReset}
+                disabled={resetting || submitting}
+                className="text-[11px] text-white/15 hover:text-white/40 transition-colors font-mono disabled:opacity-30"
+              >
+                {resetting ? "clearing…" : resetDone ? "✓ db cleared" : "reset db"}
+              </button>
+            </motion.div>
           </div>
         </motion.main>
       )}

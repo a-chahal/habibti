@@ -1,5 +1,6 @@
 "use client";
 import { useEffect, useRef, useCallback, useState } from "react";
+import { useRouter } from "next/navigation";
 import { useShipmentStore } from "@/lib/stores/shipmentStore";
 import { useSignalsStore } from "@/lib/stores/signalsStore";
 import { useBeliefsStore } from "@/lib/stores/beliefsStore";
@@ -16,6 +17,7 @@ export interface PollingState {
 }
 
 export function usePolling(shipmentId: string | null): PollingState {
+  const router = useRouter();
   const [isPolling, setIsPolling] = useState(false);
   const [lastError, setLastError] = useState<string | null>(null);
   const [lastSuccessAt, setLastSuccessAt] = useState<Date | null>(null);
@@ -38,6 +40,11 @@ export function usePolling(shipmentId: string | null): PollingState {
     try {
       // 1. Snapshot
       const snapshotRes = await fetch(`/api/shipments/${shipmentId}`);
+      if (snapshotRes.status === 404) {
+        // Shipment was deleted (e.g. DB reset) — go home
+        router.replace("/");
+        return;
+      }
       if (!snapshotRes.ok) throw new Error(`Snapshot ${snapshotRes.status}`);
       const snapshot = await snapshotRes.json();
       setShipment({
