@@ -235,65 +235,121 @@ export default function ShipmentPage({ params }: { params: { id: string } }) {
   // Auto-show first alert when in transit
   const firstAlert = alerts[0] ?? null;
 
-  // Build map arcs from options
+  // Normalise origin/destination across old and new route_data shapes
+  const getOrigin = (rd: any) => {
+    if (!rd) return null;
+    if (rd.origin_port?.lat != null) return { lat: rd.origin_port.lat, lon: rd.origin_port.lon, locode: rd.origin_port.locode };
+    if (rd.origin?.lat != null) return { lat: rd.origin.lat, lon: rd.origin.lng ?? rd.origin.lon, locode: rd.origin.locode };
+    return null;
+  };
+  const getDest = (rd: any) => {
+    if (!rd) return null;
+    if (rd.destination_port?.lat != null) return { lat: rd.destination_port.lat, lon: rd.destination_port.lon, locode: rd.destination_port.locode };
+    if (rd.destination?.lat != null) return { lat: rd.destination.lat, lon: rd.destination.lng ?? rd.destination.lon, locode: rd.destination.locode };
+    return null;
+  };
+
+  // Build map arcs from options — one arc per leg of each route
   const mapArcs = useMemo(() => {
-    if (isInTransit) {
-      // Only selected option arc in monitoring mode
-      const sel = shipment.options.find(o => o.id === selectedOptionId) ?? shipment.options[0];
-      if (!sel?.route_data) return [];
-      const rd = sel.route_data as any;
-      if (!rd.origin?.lat || !rd.destination?.lat) return [];
-      return [{
-        id: sel.id,
-        lat1: rd.origin.lat,
-        lon1: rd.origin.lng,
-        lat2: rd.destination.lat,
-        lon2: rd.destination.lng,
-        risk: (sel.risk_summary as any)?.overall ?? "low",
-        active: true,
-      }];
-    }
-    // Sourcing: all options
-    return shipment.options.flatMap(opt => {
+    const buildLegsForOption = (opt: any, active: boolean) => {
       const rd = opt.route_data as any;
-      if (!rd?.origin?.lat || !rd?.destination?.lat) return [];
+      const overall = (opt.risk_summary as any)?.overall ?? "low";
+      const legs: any[] = rd?.legs ?? [];
+
+      // New shape: emit one arc per leg
+      if (legs.length > 0) {
+        return legs
+          .map((leg: any, i: number) => {
+            const from = leg.from, to = leg.to;
+            if (from?.lat == null || to?.lat == null) return null;
+            // Per-leg severity wins; fall back to option overall
+            const legSev = leg.risk_severity && leg.risk_severity !== "none" ? leg.risk_severity : overall;
+            return {
+              id: `${opt.id}-leg-${i}`,
+              lat1: from.lat,
+              lon1: from.lon ?? from.lng,
+              lat2: to.lat,
+              lon2: to.lon ?? to.lng,
+              risk: legSev,
+              active,
+            };
+          })
+          .filter((a): a is NonNullable<typeof a> => a !== null);
+      }
+
+      // Old shape fallback: single origin → destination
+      const origin = getOrigin(rd);
+      const dest = getDest(rd);
+      if (!origin || !dest) return [];
       return [{
         id: opt.id,
-        lat1: rd.origin.lat,
-        lon1: rd.origin.lng,
-        lat2: rd.destination.lat,
-        lon2: rd.destination.lng,
-        risk: (opt.risk_summary as any)?.overall ?? "low",
-        active: opt.id === activeArcId,
+        lat1: origin.lat,
+        lon1: origin.lon,
+        lat2: dest.lat,
+        lon2: dest.lon,
+        risk: overall,
+        active,
       }];
-    });
+    };
+
+    if (isInTransit) {
+      const sel = shipment.options.find(o => o.id === selectedOptionId) ?? shipment.options[0];
+      if (!sel) return [];
+      return buildLegsForOption(sel, true);
+    }
+
+    return shipment.options.flatMap(opt => buildLegsForOption(opt, opt.id === activeArcId));
   }, [shipment.options, selectedOptionId, activeArcId, isInTransit]);
 
-  // Build map markers
+  // Build map markers — origin ports, destination, and chokepoint waypoints along each route
   const mapMarkers = useMemo(() => {
     const markers: any[] = [];
-    const dest = shipment.options[0]?.route_data as any;
-    if (dest?.destination?.lat) {
+
+    // Destination (single)
+    const firstRd = shipment.options[0]?.route_data as any;
+    const dest = getDest(firstRd);
+    if (dest) {
       markers.push({
         id: "destination",
-        lat: dest.destination.lat,
-        lng: dest.destination.lng,
+        lat: dest.lat,
+        lng: dest.lon,
         color: "#ffffff",
         size: 0.025,
       });
     }
+
     if (isSourceing || isSourcingComplete) {
-      shipment.options.forEach((opt, i) => {
+      // Origin port per option + chokepoint waypoints along each leg
+      shipment.options.forEach(opt => {
         const rd = opt.route_data as any;
-        if (rd?.origin?.lat) {
+        const overall = (opt.risk_summary as any)?.overall ?? "low";
+        const color = RISK_COLORS_HEX[overall] ?? "#ffffff";
+
+        const origin = getOrigin(rd);
+        if (origin) {
           markers.push({
             id: `origin-${opt.id}`,
-            lat: rd.origin.lat,
-            lng: rd.origin.lng,
-            color: RISK_COLORS_HEX[(opt.risk_summary as any)?.overall ?? "low"] ?? "#ffffff",
+            lat: origin.lat,
+            lng: origin.lon,
+            color,
             size: 0.018,
           });
         }
+
+        // Chokepoint markers — each leg whose .to is a chokepoint
+        const legs: any[] = rd?.legs ?? [];
+        legs.forEach((leg: any, i: number) => {
+          if (leg.chokepoint_id && leg.to?.lat != null && i < legs.length - 1) {
+            // Only intermediate chokepoints (not the final destination leg)
+            markers.push({
+              id: `${opt.id}-cp-${i}`,
+              lat: leg.to.lat,
+              lng: leg.to.lon ?? leg.to.lng,
+              color: "#fbbf24", // amber for chokepoints
+              size: 0.014,
+            });
+          }
+        });
       });
     }
     return markers;

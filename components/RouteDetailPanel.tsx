@@ -36,6 +36,13 @@ export default function RouteDetailPanel({
   const route = option?.route_data as Record<string, any> | null;
   const supplier = option?.supplier as Record<string, any> | null;
 
+  // Normalise origin/destination across old and new route_data shapes
+  const originPort = route?.origin_port ?? route?.origin ?? null;
+  const destPort = route?.destination_port ?? route?.destination ?? null;
+  const legs: any[] = Array.isArray(route?.legs) ? route!.legs : [];
+  const totalDistance = route?.total_distance_nm;
+  const totalTransit = route?.total_transit_days ?? route?.typical_transit_days;
+
   const etaStr = option?.eta
     ? new Date(option.eta).toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" })
     : null;
@@ -67,7 +74,7 @@ export default function RouteDetailPanel({
           <div className="flex items-center gap-2 mb-3">
             <span className="text-xs font-mono text-white/30">#{option?.rank}</span>
             <span className="text-xs text-white/50">
-              {route?.origin?.locode ?? option?.country} → {route?.destination?.locode ?? "USLAX"}
+              {originPort?.locode ?? option?.country} → {destPort?.locode ?? "USLAX"}
             </span>
           </div>
           <div className="flex items-start justify-between gap-4">
@@ -147,20 +154,37 @@ export default function RouteDetailPanel({
           </Section>
         )}
 
-        {/* Route */}
+        {/* Route summary */}
         {route && (
           <Section title="Route Details">
             <div className="space-y-1.5 text-xs">
-              {route.lane_name && (
+              {originPort?.name && (
                 <div className="flex justify-between">
-                  <span className="text-white/40">Lane</span>
-                  <span className="text-white/70 text-right">{route.lane_name}</span>
+                  <span className="text-white/40">Origin port</span>
+                  <span className="text-white/70 text-right">{originPort.name} ({originPort.locode})</span>
                 </div>
               )}
-              {route.typical_transit_days && (
+              {originPort?.why_this_port && (
+                <div className="text-[11px] text-white/40 italic leading-snug pl-1 border-l border-white/10 ml-1">
+                  {originPort.why_this_port}
+                </div>
+              )}
+              {destPort?.name && (
+                <div className="flex justify-between">
+                  <span className="text-white/40">Destination</span>
+                  <span className="text-white/70 text-right">{destPort.name} ({destPort.locode})</span>
+                </div>
+              )}
+              {totalDistance != null && (
+                <div className="flex justify-between">
+                  <span className="text-white/40">Distance</span>
+                  <span className="text-white/70 font-mono">{totalDistance.toLocaleString()} nm</span>
+                </div>
+              )}
+              {totalTransit != null && (
                 <div className="flex justify-between">
                   <span className="text-white/40">Transit</span>
-                  <span className="text-white/70 font-mono">{route.typical_transit_days} days</span>
+                  <span className="text-white/70 font-mono">{totalTransit} days</span>
                 </div>
               )}
               {route.chokepoints?.length > 0 && (
@@ -169,12 +193,63 @@ export default function RouteDetailPanel({
                   <div className="flex flex-wrap gap-1 mt-1">
                     {route.chokepoints.map((cp: string) => (
                       <span key={cp} className="text-[10px] px-2 py-0.5 bg-amber-900/30 text-amber-400 rounded">
-                        {cp}
+                        {cp.replace(/_/g, " ")}
                       </span>
                     ))}
                   </div>
                 </div>
               )}
+            </div>
+          </Section>
+        )}
+
+        {/* Leg-by-leg journey */}
+        {legs.length > 0 && (
+          <Section title={`Journey — ${legs.length} ${legs.length === 1 ? "leg" : "legs"}`}>
+            <div className="space-y-2">
+              {legs.map((leg: any, i: number) => {
+                const sev = leg.risk_severity && leg.risk_severity !== "none" ? leg.risk_severity : null;
+                const newsSev = leg.news_severity && leg.news_severity !== "none" ? leg.news_severity : null;
+                const wxSev = leg.weather_severity && leg.weather_severity !== "none" ? leg.weather_severity : null;
+                return (
+                  <div key={i} className="border-l-2 border-white/10 pl-3 py-1">
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="text-[11px] text-white/70 font-medium">
+                        {leg.from?.name ?? "?"} → {leg.to?.name ?? "?"}
+                      </div>
+                      {sev && (
+                        <span className={`text-[9px] px-1.5 py-0.5 rounded font-mono ${RISK_BADGE[sev] ?? "bg-slate-800 text-slate-400"}`}>
+                          {sev}
+                        </span>
+                      )}
+                    </div>
+                    <div className="flex items-center gap-3 mt-0.5 text-[10px] text-white/40 font-mono">
+                      <span>{leg.distance_nm?.toLocaleString()} nm</span>
+                      <span>{leg.estimated_days} d</span>
+                      {leg.chokepoint_id && (
+                        <span className="text-amber-400/70">↳ {leg.chokepoint_id.replace(/_/g, " ")}</span>
+                      )}
+                    </div>
+                    {leg.summary && (
+                      <p className="text-[11px] text-white/50 mt-1.5 leading-snug">{leg.summary}</p>
+                    )}
+                    {(newsSev || wxSev) && (
+                      <div className="flex gap-2 mt-1">
+                        {newsSev && (
+                          <span className="text-[9px] text-white/40">
+                            news <span className="text-white/60">{newsSev}</span>
+                          </span>
+                        )}
+                        {wxSev && (
+                          <span className="text-[9px] text-white/40">
+                            weather <span className="text-white/60">{wxSev}</span>
+                          </span>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
             </div>
           </Section>
         )}

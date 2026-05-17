@@ -1,6 +1,9 @@
 import { eq, and, sql } from "drizzle-orm";
 import { db } from "../db/client";
 import { locations } from "../db/schema";
+import { callMercury } from "../llm/openrouter";
+import { cache } from "../cache";
+import { z } from "zod";
 
 export interface PortLocation {
   locode: string;
@@ -99,6 +102,15 @@ const KNOWN_PORTS: Record<string, PortLocation> = {
   USLAX: { locode: "USLAX", name: "Los Angeles", country_code: "US", lat: 33.7295, lng: -118.2620 },
   USLGB: { locode: "USLGB", name: "Long Beach", country_code: "US", lat: 33.7476, lng: -118.2169 },
   USNYC: { locode: "USNYC", name: "New York", country_code: "US", lat: 40.6840, lng: -74.0440 },
+  USMIA: { locode: "USMIA", name: "Miami", country_code: "US", lat: 25.7780, lng: -80.1796 },
+  USSEA: { locode: "USSEA", name: "Seattle", country_code: "US", lat: 47.6062, lng: -122.3321 },
+  USHOU: { locode: "USHOU", name: "Houston", country_code: "US", lat: 29.7232, lng: -95.0143 },
+  USSAV: { locode: "USSAV", name: "Savannah", country_code: "US", lat: 32.0809, lng: -81.0912 },
+  USCHS: { locode: "USCHS", name: "Charleston", country_code: "US", lat: 32.7833, lng: -79.9333 },
+  USOAK: { locode: "USOAK", name: "Oakland", country_code: "US", lat: 37.7956, lng: -122.2786 },
+  USBAL: { locode: "USBAL", name: "Baltimore", country_code: "US", lat: 39.2647, lng: -76.5760 },
+  USORF: { locode: "USORF", name: "Norfolk (Hampton Roads)", country_code: "US", lat: 36.8508, lng: -76.3289 },
+  USTPA: { locode: "USTPA", name: "Tampa", country_code: "US", lat: 27.9447, lng: -82.4476 },
   VNSGN: { locode: "VNSGN", name: "Ho Chi Minh City", country_code: "VN", lat: 10.8231, lng: 106.6297 },
   IDTPP: { locode: "IDTPP", name: "Tanjung Priok", country_code: "ID", lat: -6.1045, lng: 106.8808 },
   CNSGH: { locode: "CNSGH", name: "Shanghai", country_code: "CN", lat: 31.2222, lng: 121.4965 },
@@ -108,6 +120,89 @@ const KNOWN_PORTS: Record<string, PortLocation> = {
   NLRTM: { locode: "NLRTM", name: "Rotterdam", country_code: "NL", lat: 51.9225, lng: 4.4792 },
 };
 
+// ─── LLM-based resolver — last-resort lookup for unknown locodes ───────────
+// Caches forever (1 year) since ports don't move. Returns null on failure.
+
+const LLMPortSchema = z.object({
+  found: z.boolean(),
+  name: z.string().nullable(),
+  country_code: z.string().length(2).nullable(),
+  lat: z.number().min(-90).max(90).nullable(),
+  lon: z.number().min(-180).max(180).nullable(),
+  is_seaport: z.boolean(),
+});
+
+async function resolvePortViaLLM(
+  nameOrLocode: string,
+  countryHint?: string
+): Promise<PortLocation | null> {
+  const cacheKey = `port-resolve:v1:${nameOrLocode.toUpperCase()}:${(countryHint ?? "").toUpperCase()}`;
+  const cached = await cache.get<PortLocation | { _miss: true }>(cacheKey);
+  if (cached) {
+    if ((cached as any)._miss) return null;
+    return cached as PortLocation;
+  }
+
+  const messages = [
+    {
+      role: "system" as const,
+      content:
+        'You resolve UN/LOCODE port references to coordinates. Given a place name or 5-character UN/LOCODE, return its details. ' +
+        'Set is_seaport=true only if this is an ocean/sea cargo port (not inland river, not airport, not generic city). ' +
+        'Return JSON ONLY, no markdown, no commentary. Schema: ' +
+        '{"found": boolean, "name": string|null, "country_code": "XX"|null, "lat": number|null, "lon": number|null, "is_seaport": boolean}. ' +
+        "If you don't know the place, return found=false.",
+    },
+    {
+      role: "user" as const,
+      content: `Resolve: "${nameOrLocode}"${countryHint ? ` (country hint: ${countryHint})` : ""}`,
+    },
+  ];
+
+  const tryOnce = async (): Promise<string> =>
+    callMercury(messages, { json: true, maxTokens: 350 });
+
+  const sanitise = (s: string): string =>
+    s.replace(/^```(?:json)?\s*/i, "").replace(/```\s*$/i, "").trim();
+
+  try {
+    let raw = sanitise(await tryOnce());
+    let parsed: z.infer<typeof LLMPortSchema>;
+    try {
+      parsed = LLMPortSchema.parse(JSON.parse(raw));
+    } catch {
+      raw = sanitise(await tryOnce());
+      parsed = LLMPortSchema.parse(JSON.parse(raw));
+    }
+    if (!parsed.found || !parsed.is_seaport || parsed.lat == null || parsed.lon == null) {
+      await cache.set(cacheKey, { _miss: true } as any, 7 * 24 * 60 * 60); // 7-day negative cache
+      return null;
+    }
+    const upper = nameOrLocode.toUpperCase();
+    // If input wasn't a 5-char locode, fabricate one only if Mercury didn't give us a country
+    const locode = /^[A-Z]{5}$/.test(upper) ? upper : `${parsed.country_code ?? "XX"}${upper.slice(0, 3).padEnd(3, "X")}`;
+    const result: PortLocation = {
+      locode,
+      name: parsed.name ?? nameOrLocode,
+      country_code: parsed.country_code ?? countryHint?.toUpperCase() ?? "XX",
+      lat: parsed.lat,
+      lng: parsed.lon,
+    };
+    await cache.set(cacheKey, result, 365 * 24 * 60 * 60); // 1y positive cache
+    return result;
+  } catch (err: any) {
+    console.warn(`[locations] LLM port resolve failed for ${nameOrLocode}: ${err.message}`);
+    await cache.set(cacheKey, { _miss: true } as any, 60 * 60); // 1h negative cache on error
+    return null;
+  }
+}
+
+/**
+ * Resolve a port name or LOCODE using a tiered chain:
+ *   1. KNOWN_PORTS dict — instant, zero cost
+ *   2. UN/LOCODE DB — fast, ~thousands of real ports
+ *   3. Mercury LLM lookup — for anything else; cached for 1 year
+ */
 export async function resolvePortWithFallback(
   nameOrLocode: string,
   country?: string
@@ -115,8 +210,10 @@ export async function resolvePortWithFallback(
   const upper = nameOrLocode.toUpperCase();
   if (KNOWN_PORTS[upper]) return KNOWN_PORTS[upper];
   try {
-    return await resolvePort(nameOrLocode, country);
+    const fromDb = await resolvePort(nameOrLocode, country);
+    if (fromDb) return fromDb;
   } catch {
-    return KNOWN_PORTS[upper] ?? null;
+    // fall through to LLM resolver
   }
+  return resolvePortViaLLM(nameOrLocode, country);
 }

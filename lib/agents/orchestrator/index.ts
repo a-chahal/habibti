@@ -7,6 +7,7 @@ import {
   createSignal,
   getOptionsForShipment,
   getSupplier,
+  getSignalsForShipment,
   listUnprocessedShipments,
   listConfirmedShipments,
 } from "../../db/queries";
@@ -19,7 +20,17 @@ import { ComplianceScreenerAgent } from "../compliance-screener";
 import { SupplierVerifierAgent } from "../supplier-verifier";
 import { CountryRiskAgent } from "../country-risk";
 import { RoutePrescorer } from "../route-prescorer";
+import { PortDiscovererAgent } from "../port-discoverer";
+import type { PortDiscovererOutput } from "../port-discoverer";
+import { LegAnalyzerAgent } from "../leg-analyzer";
+import { FreightPricerAgent } from "../freight-pricer";
+import type { FreightEstimateOutput } from "../freight-pricer";
+import { ProductPricerAgent } from "../product-pricer";
+import type { ProductPriceOutput } from "../product-pricer";
 import { OptionRankerAgent } from "../option-ranker";
+import type { OptionCandidate } from "../option-ranker";
+import { planRoutes } from "../../routing/route-planner";
+import { resolvePortWithFallback } from "../../sources/locations";
 import { FeedbackLoopAgent } from "../feedback-loop";
 import { SynthesizerAgent } from "../synthesizer";
 import { VesselTrackerAgent } from "../vessel-tracker";
@@ -127,6 +138,14 @@ class Orchestrator {
 
   private async onShipmentNew(payload: PayloadMap["SHIPMENT_NEW"]) {
     const { shipmentId } = payload;
+
+    // Claim immediately: move out of 'draft' so hot-reload catch-ups don't re-dispatch
+    try {
+      await updateShipment(shipmentId, { status: "pending" });
+    } catch {
+      // non-fatal — proceed regardless
+    }
+
     console.log(`[Orchestrator] SHIPMENT_NEW ${shipmentId} — dispatching intent-parser`);
 
     const shipment = await getShipment(shipmentId);
@@ -345,7 +364,7 @@ class Orchestrator {
     }
   }
 
-  private async runSourcingPipeline(
+  async runSourcingPipeline(
     shipmentId: string,
     intent: IntentOutput,
     productValueUsd: number
@@ -465,16 +484,7 @@ class Orchestrator {
         // Pass real supplier name only for the preferred-origin candidate
         const supplierName = isPreferred ? (intent.supplier ?? null) : null;
 
-        // route-prescorer runs in parallel with supplier/compliance chain
-        const routePromise = this.dispatchCapped("route-prescorer", shipmentId, {
-          origin_country: cc,
-          destination_port: destinationPort,
-          deadline_date: intent.deadline_date,
-          shipmentId,
-        }).catch((err: any) =>
-          console.error(`[Orchestrator] route-prescorer failed for ${cc}:`, err.message)
-        );
-
+        // (route-prescorer removed — route-planner + leg-analyzer handle routing in Phase 2d/2e)
         // supplier-verifier first, then feed parent_companies to compliance-screener
         let parentCompanies: string[] = [];
         try {
@@ -500,22 +510,256 @@ class Orchestrator {
         }).catch((err: any) =>
           console.error(`[Orchestrator] compliance-screener failed for ${cc}:`, err.message)
         );
-
-        await routePromise;
       })
     );
+
+    // ── Phase 2c: Port discovery (per viable country) ──
+    // For each viable country, ask port-discoverer for top 3 origin ports.
+    const portsByCountry = new Map<string, PortDiscovererOutput["ports"]>();
+    await Promise.allSettled(
+      viableCandidates.map(async (cand) => {
+        try {
+          const result = (await this.dispatchCapped("port-discoverer", shipmentId, {
+            country_code: cand.country_code,
+            hs_code: hsCode,
+            shipmentId,
+          })) as PortDiscovererOutput;
+          portsByCountry.set(cand.country_code, result.ports);
+        } catch (err: any) {
+          console.error(`[Orchestrator] port-discoverer failed for ${cand.country_code}:`, err.message);
+        }
+      })
+    );
+
+    // ── Phase 2d: Route planning (pure code, no LLM) ──
+    // For origin-specified case: 1 country × top 3 ports × top 1 route = 3 candidates
+    // For no-origin case: top 3 countries × top 1 port × top 1 route = 3 candidates
+    // Resolve destination port — try DB, fall back to the curated KNOWN_PORTS dict,
+    // and finally fall back to USLAX so the pipeline never silently dies on an
+    // unmapped destination (e.g. USMIA which UN/LOCODE inexplicably omits).
+    let destPort = await resolvePortWithFallback(destinationPort, destinationCountry);
+    if (!destPort) {
+      console.warn(`[Orchestrator] destination port ${destinationPort} not in locations table or KNOWN_PORTS — falling back to USLAX`);
+      destPort = await resolvePortWithFallback("USLAX", "US");
+    }
+    if (!destPort) {
+      console.error(`[Orchestrator] could not resolve any destination port — aborting pipeline`);
+      return;
+    }
+
+    type RouteCandidateRaw = {
+      cc: string;
+      countryName: string;
+      port: PortDiscovererOutput["ports"][number];
+      route: ReturnType<typeof planRoutes>[number];
+    };
+
+    const routeCandidates: RouteCandidateRaw[] = [];
+
+    if (preferredOrigin && portsByCountry.has(preferredOrigin)) {
+      // 3 routes from the same country, one per top port
+      const ports = portsByCountry.get(preferredOrigin)!.slice(0, 3);
+      for (const port of ports) {
+        const routes = planRoutes(
+          { locode: port.locode, name: port.name, lat: port.lat, lon: port.lon },
+          { locode: destPort.locode, name: destPort.name, lat: destPort.lat, lon: destPort.lng },
+          { maxRoutes: 1 }
+        );
+        if (routes[0]) {
+          const cand = viableCandidates.find(
+            (c) => c.country_code.toUpperCase() === preferredOrigin
+          );
+          routeCandidates.push({
+            cc: preferredOrigin,
+            countryName: cand?.country_name ?? preferredOrigin,
+            port,
+            route: routes[0],
+          });
+        }
+      }
+    } else {
+      // Top 3 countries × best port × best route
+      const top3 = viableCandidates.slice(0, 3);
+      for (const cand of top3) {
+        const ports = portsByCountry.get(cand.country_code);
+        if (!ports?.length) continue;
+        const port = ports[0]; // best port for this country
+        const routes = planRoutes(
+          { locode: port.locode, name: port.name, lat: port.lat, lon: port.lon },
+          { locode: destPort.locode, name: destPort.name, lat: destPort.lat, lon: destPort.lng },
+          { maxRoutes: 1 }
+        );
+        if (routes[0]) {
+          routeCandidates.push({
+            cc: cand.country_code,
+            countryName: cand.country_name,
+            port,
+            route: routes[0],
+          });
+        }
+      }
+    }
+
+    console.log(`[Orchestrator] Phase 2d: ${routeCandidates.length} route candidates planned`);
+
+    // ── Phase 2e: Per-leg + per-route analysis fan-out ──
+    // Dedupe legs by chokepoint sequence so we don't analyse the same Suez→Gibraltar leg twice.
+    const uniqueLegs = new Map<string, RouteCandidateRaw["route"]["legs"][number]>();
+    for (const rc of routeCandidates) {
+      for (const leg of rc.route.legs) {
+        const key = `${Math.round(leg.from.lat)}_${Math.round(leg.from.lon)}_${Math.round(leg.to.lat)}_${Math.round(leg.to.lon)}_${leg.chokepoint_id ?? "openwater"}`;
+        if (!uniqueLegs.has(key)) uniqueLegs.set(key, leg);
+      }
+    }
+    console.log(`[Orchestrator] Phase 2e: dispatching ${uniqueLegs.size} unique leg-analyzer + ${routeCandidates.length} freight-pricer + product-pricer per country`);
+
+    const legAnalysisByKey = new Map<string, any>();
+
+    await Promise.allSettled([
+      // Leg analysis fan-out
+      ...Array.from(uniqueLegs.entries()).map(async ([key, leg]) => {
+        try {
+          const result = await this.dispatchCapped("leg-analyzer", shipmentId, {
+            shipmentId,
+            leg: { ...leg, leg_id: key },
+          });
+          legAnalysisByKey.set(key, result);
+        } catch (err: any) {
+          console.error(`[Orchestrator] leg-analyzer failed for ${key}:`, err.message);
+        }
+      }),
+      // Product pricer per unique country (cache covers duplicates)
+      ...Array.from(new Set(routeCandidates.map((r) => r.cc))).map((cc) =>
+        this.dispatchCapped("product-pricer", shipmentId, {
+          hs_code: hsCode,
+          origin_country: cc,
+          quantity: intent.quantity,
+          quantity_unit: intent.quantity_unit,
+          fallback_budget_usd: intent.budget_usd ?? undefined,
+          shipmentId,
+        }).catch((err: any) => console.error(`[Orchestrator] product-pricer failed for ${cc}:`, err.message))
+      ),
+    ]);
+
+    // ── Phase 2f: Freight pricing (after leg analysis so we have all routes priced together) ──
+    const freightByCandidate = new Map<number, FreightEstimateOutput>();
+    await Promise.allSettled(
+      routeCandidates.map(async (rc, idx) => {
+        try {
+          const result = (await this.dispatchCapped("freight-pricer", shipmentId, {
+            shipmentId,
+            route: rc.route,
+            container_count: 1,
+            container_type: "40ft",
+          })) as FreightEstimateOutput;
+          freightByCandidate.set(idx, result);
+        } catch (err: any) {
+          console.error(`[Orchestrator] freight-pricer failed for ${rc.cc}/${rc.port.locode}:`, err.message);
+        }
+      })
+    );
+
+    // ── Phase 3: Build OptionCandidate list and dispatch option-ranker ──
+    const candidatesForRanker: OptionCandidate[] = [];
+    const today = new Date();
+    const allSignalsForLookup = await getSignalsForShipment(shipmentId);
+    const tariffSignals = allSignalsForLookup.filter((s: any) => s.agent_name === "tariff-calculator");
+    const productPriceSignals = allSignalsForLookup.filter((s: any) => s.agent_name === "product-pricer");
+
+    for (let i = 0; i < routeCandidates.length; i++) {
+      const rc = routeCandidates[i];
+      const tariff = (tariffSignals.find((s: any) =>
+        (s.payload?.origin_country ?? "").toUpperCase() === rc.cc.toUpperCase()
+      )?.payload ?? {}) as any;
+      const productPrice = (productPriceSignals.find((s: any) =>
+        (s.payload?.origin_country ?? "").toUpperCase() === rc.cc.toUpperCase()
+      )?.payload as ProductPriceOutput | undefined);
+      const freight = freightByCandidate.get(i);
+
+      const productValue = productPrice?.total_value_usd ?? productValueUsd;
+      const dutyPct = Number(tariff.total_duty_pct ?? 0);
+      const dutyUsd = Math.round(productValue * dutyPct / 100);
+      const freightUsd = freight?.base_freight_usd ?? 0;
+      const tollsUsd = freight?.canal_tolls_usd ?? 0;
+      const warRiskUsd = freight?.war_risk_premium_usd ?? 0;
+      const bafUsd = freight?.bunker_adjustment_usd ?? 0;
+      const insuranceUsd = Math.round(productValue * 0.005); // ~0.5% standard cargo insurance
+      const brokerUsd = 250;
+      const totalLanded =
+        productValue + dutyUsd + freightUsd + tollsUsd + warRiskUsd + bafUsd + insuranceUsd + brokerUsd;
+
+      const legSummaries = rc.route.legs.map((leg) => {
+        const key = `${Math.round(leg.from.lat)}_${Math.round(leg.from.lon)}_${Math.round(leg.to.lat)}_${Math.round(leg.to.lon)}_${leg.chokepoint_id ?? "openwater"}`;
+        const analysis = legAnalysisByKey.get(key);
+        return {
+          summary: analysis?.summary ?? `${leg.from.name} → ${leg.to.name} (${leg.distance_nm}nm, ${leg.estimated_days}d)`,
+          severity: analysis?.risk_severity ?? "none",
+        };
+      });
+
+      const eta = new Date(today.getTime() + rc.route.total_transit_days * 86_400_000);
+
+      candidatesForRanker.push({
+        country_code: rc.cc,
+        country_name: rc.countryName,
+        origin_port: rc.port,
+        route_data: {
+          origin_port: { ...rc.port, why_this_port: rc.port.rationale },
+          destination_port: {
+            locode: destPort.locode,
+            name: destPort.name,
+            lat: destPort.lat,
+            lon: destPort.lng,
+          },
+          legs: rc.route.legs.map((leg) => {
+            const key = `${Math.round(leg.from.lat)}_${Math.round(leg.from.lon)}_${Math.round(leg.to.lat)}_${Math.round(leg.to.lon)}_${leg.chokepoint_id ?? "openwater"}`;
+            const analysis = legAnalysisByKey.get(key);
+            return {
+              ...leg,
+              news_severity: analysis?.news_severity ?? "none",
+              weather_severity: analysis?.weather_severity ?? "none",
+              traffic_severity: analysis?.traffic_severity ?? "none",
+              risk_severity: analysis?.risk_severity ?? "none",
+              summary: analysis?.summary ?? null,
+            };
+          }),
+          chokepoints: rc.route.chokepoints,
+          transshipment_ports: rc.route.transshipment_ports,
+          total_distance_nm: rc.route.total_distance_nm,
+          total_transit_days: rc.route.total_transit_days,
+        },
+        cost_breakdown: {
+          product_value_usd: productValue,
+          base_duty_pct: tariff.base_duty_pct ?? null,
+          section_301_pct: tariff.section_301_pct ?? null,
+          section_232_pct: tariff.section_232_pct ?? null,
+          total_duty_pct: dutyPct,
+          freight_usd: freightUsd,
+          canal_tolls_usd: tollsUsd,
+          war_risk_premium_usd: warRiskUsd,
+          insurance_usd: insuranceUsd,
+          broker_fee_usd: brokerUsd,
+          total_landed_cost_usd: totalLanded,
+        },
+        eta,
+        leg_summaries: legSummaries,
+        port_rationale: rc.port.rationale,
+      });
+    }
 
     const sourcing_ms = Date.now() - start;
     const agentNames = [
       "country-discoverer",
       "tariff-calculator",
       "country-risk",
-      "route-prescorer",
       "supplier-verifier",
       "compliance-screener",
+      "port-discoverer",
+      "leg-analyzer",
+      "freight-pricer",
+      "product-pricer",
     ];
 
-    // Write sourcing_complete signal
     try {
       await createSignal({
         agent_name: "orchestrator",
@@ -527,6 +771,8 @@ class Orchestrator {
           durationMs: sourcing_ms,
           candidateCount: candidates.length,
           viableCount: viableCandidates.length,
+          routeCandidateCount: routeCandidates.length,
+          legAnalysisCount: legAnalysisByKey.size,
         },
         citations: [],
         occurred_at: new Date(),
@@ -538,13 +784,18 @@ class Orchestrator {
     emit("SOURCING_COMPLETE", { shipmentId, agentNames, durationMs: sourcing_ms });
 
     console.log(
-      `[Orchestrator] SOURCING_COMPLETE for shipment ${shipmentId} in ${(sourcing_ms / 1000).toFixed(1)}s — dispatching option-ranker`
+      `[Orchestrator] SOURCING_COMPLETE for shipment ${shipmentId} in ${(sourcing_ms / 1000).toFixed(1)}s — dispatching option-ranker with ${candidatesForRanker.length} candidates`
     );
 
-    // Phase 3: Option Ranker — synthesizes all sourcing signals into 3 ranked options
+    if (candidatesForRanker.length === 0) {
+      console.error(`[Orchestrator] no candidates to rank for ${shipmentId} — pipeline aborted`);
+      return;
+    }
+
     try {
       await this.dispatchCapped("option-ranker", shipmentId, {
         shipmentId,
+        candidates: candidatesForRanker,
         intent_data: {
           ...(intent as unknown as Record<string, unknown>),
           product_value_usd: productValueUsd,
@@ -580,6 +831,18 @@ export function registerAllAgents() {
   );
   orchestrator.register("route-prescorer", (payload) =>
     new RoutePrescorer().run(payload) as Promise<unknown>
+  );
+  orchestrator.register("port-discoverer", (payload) =>
+    new PortDiscovererAgent().run(payload) as Promise<unknown>
+  );
+  orchestrator.register("leg-analyzer", (payload) =>
+    new LegAnalyzerAgent().run(payload) as Promise<unknown>
+  );
+  orchestrator.register("freight-pricer", (payload) =>
+    new FreightPricerAgent().run(payload) as Promise<unknown>
+  );
+  orchestrator.register("product-pricer", (payload) =>
+    new ProductPricerAgent().run(payload) as Promise<unknown>
   );
   orchestrator.register("option-ranker", (payload) =>
     new OptionRankerAgent().run(payload) as Promise<unknown>

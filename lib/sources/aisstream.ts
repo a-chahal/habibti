@@ -72,6 +72,66 @@ export function subscribeAIS(
   return () => ws.close();
 }
 
+/**
+ * Sample AIS traffic in a bbox for `windowMs` and return summary stats.
+ * Used by leg-analyzer to gauge real-time vessel density and dwell.
+ */
+export function sampleAISDensity(
+  bbox: BoundingBox,
+  windowMs = 8_000
+): Promise<{
+  unique_vessels: number;
+  reports: number;
+  avg_sog: number; // knots — low avg suggests congestion
+  slow_vessels: number; // count with SOG < 4 knots (anchored/queueing)
+}> {
+  return new Promise((resolve) => {
+    const seen = new Map<number, PositionReport[]>();
+    let reports = 0;
+    let close: (() => void) | null = null;
+    let resolved = false;
+    const finish = () => {
+      if (resolved) return;
+      resolved = true;
+      close?.();
+      let sumSog = 0;
+      let slow = 0;
+      for (const [, history] of seen) {
+        const last = history[history.length - 1];
+        sumSog += last.sog;
+        if (last.sog < 4) slow++;
+      }
+      const n = seen.size || 1;
+      resolve({
+        unique_vessels: seen.size,
+        reports,
+        avg_sog: +(sumSog / n).toFixed(1),
+        slow_vessels: slow,
+      });
+    };
+    const timer = setTimeout(finish, windowMs);
+    try {
+      close = subscribeAIS(
+        bbox,
+        [],
+        (r) => {
+          reports++;
+          const list = seen.get(r.mmsi) ?? [];
+          list.push(r);
+          seen.set(r.mmsi, list);
+        },
+        () => {
+          clearTimeout(timer);
+          finish();
+        }
+      );
+    } catch {
+      clearTimeout(timer);
+      finish();
+    }
+  });
+}
+
 export function waitForOnePositionReport(
   bbox: BoundingBox,
   timeoutMs = 15_000

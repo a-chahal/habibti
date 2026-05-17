@@ -1,4 +1,4 @@
-import { eq, desc, and, lt, sql, gte, inArray } from "drizzle-orm";
+import { eq, desc, and, lt, sql, gte, inArray, or } from "drizzle-orm";
 import { db } from "./client";
 import {
   shipments,
@@ -25,10 +25,19 @@ export async function listShipments() {
 }
 
 export async function listUnprocessedShipments() {
-  return db.query.shipments.findMany({
-    where: inArray(shipments.status, ["draft", "pending"]),
-    orderBy: desc(shipments.created_at),
-  });
+  // Only pick up `draft` shipments — `pending` means the orchestrator already claimed it.
+  // Also recover stale `pending` shipments (> 5 min old) where the server crashed mid-pipeline.
+  const staleThreshold = new Date(Date.now() - 5 * 60 * 1000);
+  return db
+    .select()
+    .from(shipments)
+    .where(
+      or(
+        eq(shipments.status, "draft"),
+        and(eq(shipments.status, "pending"), lt(shipments.updated_at, staleThreshold))
+      )
+    )
+    .orderBy(desc(shipments.created_at));
 }
 
 export async function listConfirmedShipments() {
@@ -152,6 +161,18 @@ export async function searchLocations(query: string, country?: string) {
       sql`lower(${locations.name}) like lower(${"%" + query + "%"})`
     ),
     limit: 10,
+  });
+}
+
+export async function listPortsForCountry(countryCode: string, limit = 50) {
+  return db.query.locations.findMany({
+    where: and(
+      eq(locations.is_port, true),
+      eq(locations.country_code, countryCode.toUpperCase()),
+      sql`${locations.latitude} is not null`,
+      sql`${locations.longitude} is not null`
+    ),
+    limit,
   });
 }
 

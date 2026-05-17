@@ -1,337 +1,182 @@
 import { z } from "zod";
 import { Agent } from "../base";
-import { getSignalsForShipment, createOption, upsertSupplier } from "../../db/queries";
+import { getSignalsForShipment, createOption } from "../../db/queries";
 
-// ─── Zod schema for Opus output ──────────────────────────────────────────────
+// ─── Schemas ───────────────────────────────────────────────────────────────
 
 const CostBreakdown = z.object({
-  product_value_usd: z.number().nullable().default(0),
+  product_value_usd: z.number(),
   base_duty_pct: z.number().nullable(),
   section_301_pct: z.number().nullable(),
   section_232_pct: z.number().nullable(),
-  total_duty_pct: z.number().nullable().default(0),
-  freight_usd: z.number().nullable().default(0),
-  insurance_usd: z.number().nullable().default(0),
-  broker_fee_usd: z.number().nullable().default(250),
-  total_landed_cost_usd: z.number().nullable().default(0),
+  total_duty_pct: z.number(),
+  freight_usd: z.number(),
+  canal_tolls_usd: z.number(),
+  war_risk_premium_usd: z.number(),
+  insurance_usd: z.number(),
+  broker_fee_usd: z.number(),
+  total_landed_cost_usd: z.number(),
 });
 
 const RouteData = z.object({
-  lane_name: z.string(),
+  origin_port: z.object({
+    locode: z.string(),
+    name: z.string(),
+    lat: z.number(),
+    lon: z.number(),
+    why_this_port: z.string(),
+  }),
+  destination_port: z.object({
+    locode: z.string(),
+    name: z.string(),
+    lat: z.number(),
+    lon: z.number(),
+  }),
+  legs: z.array(z.any()),
   chokepoints: z.array(z.string()),
-  traffic_density: z.string(),
-  weather_outlook: z.string(),
-  chokepoint_risks: z.array(
-    z.object({ name: z.string(), severity: z.string(), summary: z.string() })
-  ).optional(),
+  transshipment_ports: z.array(z.string()),
+  total_distance_nm: z.number(),
+  total_transit_days: z.number(),
 });
 
 const RiskSummary = z.object({
   country_risk: z.string(),
   compliance: z.string(),
   route_risk: z.string(),
-  overall: z.string().transform((v) => {
-    const s = v.toLowerCase();
-    if (s.includes("high") || s.includes("critical")) return "high";
-    if (s.includes("medium") || s.includes("moderate")) return "medium";
-    return "low";
-  }),
+  overall: z.enum(["low", "medium", "high"]),
 });
 
 const RankedOption = z.object({
   rank: z.number().int().min(1).max(3),
   country_code: z.string(),
   country_name: z.string(),
-  supplier_name: z.string().nullable(),
-  transit_days: z.number(),
-  route_data: RouteData,
-  cost_breakdown: CostBreakdown,
+  origin_port_locode: z.string(),
+  reasoning: z.string().min(80),
   risk_summary: RiskSummary,
-  reasoning: z.string().min(10),
+  // The option-ranker is given pre-computed cost_breakdown and route_data; it
+  // only ranks + writes reasoning. We re-attach the data in code after.
 });
 
 export const OptionRankerOutput = z.object({
-  options: z.array(RankedOption).length(3),
+  options: z.array(RankedOption).min(1).max(3),
 });
 
 export type OptionRankerOutput = z.infer<typeof OptionRankerOutput>;
 
-// ─── Context builder ─────────────────────────────────────────────────────────
+// ─── Candidate type ────────────────────────────────────────────────────────
 
-type Signal = { agent_name: string; signal_type: string; payload: unknown };
-
-function buildContext(signals: Signal[], intent: Record<string, unknown>): string {
-  const byAgent = new Map<string, Signal[]>();
-  for (const s of signals) {
-    if (!byAgent.has(s.agent_name)) byAgent.set(s.agent_name, []);
-    byAgent.get(s.agent_name)!.push(s);
-  }
-
-  const p = (s: Signal) => (s.payload ?? {}) as Record<string, unknown>;
-  const lines: string[] = [];
-
-  const today = new Date();
-  const deadline = intent.deadline_date ? new Date(String(intent.deadline_date)) : null;
-
-  lines.push("=== SHIPMENT INTENT ===");
-  lines.push(`HS Code: ${intent.hs_code}`);
-  lines.push(`Product: ${intent.product_description}`);
-  lines.push(`Quantity: ${intent.quantity} ${intent.quantity_unit ?? ""}`);
-  lines.push(`Budget: $${intent.budget_usd ?? "unspecified"}`);
-  lines.push(`Product value (est): $${intent.product_value_usd ?? "unspecified"} (budget / 1.25 heuristic)`);
-  lines.push(`Deadline: ${intent.deadline_date ?? "unspecified"}`);
-  lines.push(`Destination port: ${intent.destination_port ?? "USLAX"}`);
-  if (intent.supplier) lines.push(`Buyer-specified supplier: ${intent.supplier}`);
-  if (intent.origin_country) lines.push(`BUYER-SPECIFIED ORIGIN: ${intent.origin_country} — MUST be ranked #1 unless hard-disqualified by compliance`);
-
-  lines.push("\n=== CANDIDATE COUNTRIES ===");
-  for (const s of byAgent.get("country-discoverer") ?? []) {
-    const candidates = (p(s).candidates as any[]) ?? [];
-    for (const c of candidates) {
-      lines.push(
-        `  ${c.country_code} (${c.country_name}): US imports $${Number(c.us_import_volume_usd).toLocaleString()}, trend=${c.trend}, established_lane=${c.lane_established}`
-      );
-    }
-  }
-
-  lines.push("\n=== TARIFF CALCULATIONS ===");
-  for (const s of byAgent.get("tariff-calculator") ?? []) {
-    const q = p(s);
-    lines.push(
-      `  ${q.origin_country}: base=${q.base_duty_pct ?? 0}%, 301=${q.section_301_pct ?? "N/A"}%, 232=${q.section_232_pct ?? "N/A"}%, total=${q.total_duty_pct}%, freight=$${q.freight_estimate_usd}, landed=$${q.total_landed_cost_usd}`
-    );
-  }
-
-  lines.push("\n=== COMPLIANCE SCREENING ===");
-  for (const s of byAgent.get("compliance-screener") ?? []) {
-    const q = p(s);
-    const matches = (q.matches as any[]) ?? [];
-    lines.push(
-      `  ${q.country}: verdict=${q.verdict}, UFLPA_flag=${q.uflpa_flag}, confirmed_matches=${matches.length}`
-    );
-    if (matches.length > 0) {
-      lines.push(`    Matches: ${matches.map((m: any) => m.entity_name).join(", ")}`);
-    }
-  }
-
-  lines.push("\n=== SUPPLIER VERIFICATION ===");
-  for (const s of byAgent.get("supplier-verifier") ?? []) {
-    const q = p(s);
-    const candidates = (q.match_candidates as any[]) ?? [];
-    const top = candidates[0];
-    lines.push(
-      `  ${q.country}: registry=${q.registry_source}, limited_data=${q.limited_data}`
-    );
-    if (top) {
-      lines.push(
-        `    Best match: "${top.name}" conf=${top.match_confidence?.toFixed(2)}, status=${top.status}, incorporated=${top.incorporation_date ?? "unknown"}`
-      );
-    } else {
-      lines.push(`    No registry matches found`);
-    }
-  }
-
-  lines.push("\n=== COUNTRY RISK ===");
-  for (const s of byAgent.get("country-risk") ?? []) {
-    const q = p(s);
-    const events = (q.top_events as any[]) ?? [];
-    const cats = q.event_count_by_category as Record<string, number> | undefined;
-    const totalEvents = cats ? Object.values(cats).reduce((a, b) => a + b, 0) : 0;
-    lines.push(`  ${q.country_code}: stability=${q.stability}, total_events=${totalEvents}`);
-    for (const ev of events.slice(0, 3)) {
-      lines.push(`    [${ev.severity}] ${ev.date}: ${ev.headline} (relevance=${ev.relevance_score?.toFixed(2)})`);
-    }
-  }
-
-  lines.push("\n=== ROUTE ASSESSMENTS ===");
-  for (const s of byAgent.get("route-prescorer") ?? []) {
-    const q = p(s);
-    const routes = (q.routes as any[]) ?? [];
-    const route = routes[0];
-    if (!route) continue;
-    lines.push(
-      `  ${q.origin_country}→${q.destination_port}: "${route.lane_name}", ${route.typical_transit_days}d, density=${route.current_traffic_density}, weather="${route.weather_outlook}"`
-    );
-    if (q.transit_buffer_days !== undefined && q.transit_buffer_days !== null) {
-      lines.push(`    Transit buffer: ${q.transit_buffer_days} days${(q.transit_buffer_days as number) < 5 ? " ⚠ TIGHT" : ""}`);
-    }
-    for (const cp of route.chokepoint_risks ?? []) {
-      if (cp.severity !== "none") {
-        lines.push(`    ⚠ ${cp.name} [${cp.severity}]: ${(cp.current_events ?? "").slice(0, 100)}`);
-      }
-    }
-  }
-
-  // Pre-compute derived delivery estimates so LLM does not need to do date math
-  lines.push("\n=== DERIVED DELIVERY ESTIMATES (use these, do not recalculate) ===");
-  for (const s of byAgent.get("route-prescorer") ?? []) {
-    const q = p(s);
-    const routes = (q.routes as any[]) ?? [];
-    const route = routes[0];
-    if (!route) continue;
-    const transitDays = route.typical_transit_days as number;
-    const eta = new Date(today.getTime() + transitDays * 86400000);
-    const bufferDays = deadline ? Math.round((deadline.getTime() - eta.getTime()) / 86400000) : null;
-    lines.push(
-      `  ${q.origin_country}: transit=${transitDays}d, estimated_arrival=${eta.toISOString().slice(0, 10)}` +
-      (bufferDays !== null ? `, deadline_buffer=${bufferDays}d${bufferDays < 0 ? " ⚠ MISSES DEADLINE" : ""}` : "")
-    );
-  }
-
-  // Include signal confidence so LLM can discount low-confidence sources
-  lines.push("\n=== SIGNAL CONFIDENCE NOTES ===");
-  const lowConfidenceSignals = signals.filter(s => {
-    const conf = (s as any).confidence;
-    return conf !== undefined && conf !== null && Number(conf) < 0.5;
-  });
-  for (const s of lowConfidenceSignals) {
-    lines.push(`  ${s.agent_name} (${s.signal_type}): confidence=${Number((s as any).confidence).toFixed(2)} — low confidence, treat as indicative only`);
-  }
-
-  return lines.join("\n");
+export interface OptionCandidate {
+  country_code: string;
+  country_name: string;
+  origin_port: { locode: string; name: string; lat: number; lon: number };
+  route_data: any;
+  cost_breakdown: z.infer<typeof CostBreakdown>;
+  eta: Date;
+  leg_summaries: Array<{ summary: string; severity: string }>;
+  port_rationale: string;
 }
 
-// ─── System prompt ───────────────────────────────────────────────────────────
+// ─── Helpers ───────────────────────────────────────────────────────────────
 
-const SYSTEM_PROMPT = `You are a senior trade analyst briefing a small business owner (Sarah) on her three best sourcing options.
+type Signal = { agent_name: string; signal_type: string; payload: any };
 
-ANALYST WRITING RULES — strictly enforced:
-1. Every claim cites a specific number from the data ($ landed cost, duty %, transit days, confidence score, event count, relevance score).
-2. Name the specific risk and why it matters for THIS shipment's deadline and budget.
-3. State the option's biggest weakness honestly. Use "the critical risk" or "the main constraint."
-4. Never use "could," "may," "might," "appears to," or "seems" without a qualifying data point.
-5. Each reasoning paragraph must be at least 120 words.
+function signalsByAgent(signals: Signal[]): Map<string, Signal[]> {
+  const m = new Map<string, Signal[]>();
+  for (const s of signals) {
+    if (!m.has(s.agent_name)) m.set(s.agent_name, []);
+    m.get(s.agent_name)!.push(s);
+  }
+  return m;
+}
 
-GOOD EXAMPLE 1 — model this voice exactly:
-"Vietnam earns rank #1 because it delivers the lowest total landed cost ($28,400) against a $30,000 budget with zero Section 301 exposure. The tariff analysis shows a 12.9% total duty rate — $7,500 less than the China equivalent. Country-risk returned 'stable' with zero port disruption events in 30 days (GDELT, 30-day window). The GLEIF registry returned a partial match at confidence 0.61 — lower than ideal — but the Malacca Strait showed 'none' severity in chokepoint screening. Route: 16 days trans-Pacific puts estimated arrival July 9, leaving 6 days of schedule buffer before the July 15 deadline. The critical risk: GLEIF's limited data for Vietnamese mills means supplier verification requires a pre-shipment inspection before funds are committed."
+// ─── System prompt ─────────────────────────────────────────────────────────
 
-GOOD EXAMPLE 2 — model this voice exactly:
-"India ranks #2 because it offers the strongest supplier verification in this analysis: the GLEIF match returned confidence 0.94 — an active LEI since 2010 confirms the entity is real and registered. Compliance screening returned 'clean' with zero OFAC or UFLPA matches. Landed cost is $31,200 — $1,200 over Sarah's $30,000 budget — but the 25% Section 301 avoidance (vs. China) saves $6,250 on larger orders, making India more cost-competitive at scale. Country-risk shows 'watch' stability: one Tamil Nadu labor event (relevance score 0.38 — minor, no port impact). The critical risk: 28 days via Suez puts estimated arrival at July 13, leaving only 2 days of deadline buffer. If the Bab-el-Mandeb situation (currently 'medium' severity) adds 3+ days, delivery fails."
+const SYSTEM_PROMPT = `You are a senior trade analyst briefing a small business owner on her three best sourcing options.
 
-DO NOT WRITE LIKE THIS — this will be rejected:
-"This option offers a balanced combination of cost efficiency and supply chain reliability. The supplier appears to have adequate capabilities and the country has a generally stable environment. Transit times are within acceptable ranges. There may be some considerations around tariffs. Overall this represents a viable option."
+You are given pre-computed candidates — each with a real origin port, multi-leg route through real chokepoints, computed freight costs (distance + fuel + tolls + war-risk premiums), Comtrade-based product price, and leg-by-leg risk analysis. Your job is to RANK them (1-3) and write a 120+ word analyst paragraph per option that cites the actual numbers.
 
-FILTERING RULES (apply before ranking):
-- Discard any country where compliance-screener verdict = "flagged" AND uflpa_flag = true. Hard disqualification.
-- Prefer countries where compliance verdict = "clean."
-- The 3 options must be from 3 different country_codes.
-- If the intent includes a BUYER-SPECIFIED ORIGIN, that country_code MUST be rank 1 unless it is hard-disqualified. No exceptions.
+WRITING RULES:
+1. Every paragraph cites specific numbers: $ landed cost, duty %, transit days, leg-specific risks, fuel cost, tolls.
+2. Name the binding risk for each option ("the critical risk is X").
+3. If a war-risk zone or chokepoint anomaly was found, mention it by leg name and severity.
+4. Never use "could," "may," "might" without a number to back it up.
+5. Paragraphs ≥ 120 words.
 
-OUTPUT JSON schema (return exactly this, no markdown):
+RANKING RULES:
+- Lower total_landed_cost_usd wins, tiebroken by lower risk severity, tiebroken by shorter transit_days.
+- If user specified an origin_country, all three options will already be from that country — just rank the ports/routes.
+
+OUTPUT JSON (no markdown):
 {
   "options": [
     {
       "rank": 1,
-      "country_code": "VN",
-      "country_name": "Vietnam",
-      "supplier_name": "Vietnam Textile Corp or null if no registry match",
-      "transit_days": 16,
-      "route_data": {
-        "lane_name": "Trans-Pacific (Vietnam → Los Angeles)",
-        "chokepoints": ["Malacca Strait"],
-        "traffic_density": "medium",
-        "weather_outlook": "Calm (avg wave 1.2m)",
-        "chokepoint_risks": [{ "name": "Malacca Strait", "severity": "none", "summary": "No active disruptions" }]
-      },
-      "cost_breakdown": {
-        "product_value_usd": 25000,
-        "base_duty_pct": 9.0,
-        "section_301_pct": null,
-        "section_232_pct": null,
-        "total_duty_pct": 9.0,
-        "freight_usd": 4500,
-        "insurance_usd": 300,
-        "broker_fee_usd": 250,
-        "total_landed_cost_usd": 28325
-      },
+      "country_code": "CN",
+      "country_name": "China",
+      "origin_port_locode": "CNSGH",
+      "reasoning": "120+ word paragraph citing numbers...",
       "risk_summary": {
-        "country_risk": "stable — 0 port events, GDELT 30-day clean",
-        "compliance": "clean — no OFAC/UFLPA matches",
-        "route_risk": "low — Malacca severity: none",
+        "country_risk": "stable — 0 events GDELT 30d",
+        "compliance": "clean — no OFAC/UFLPA",
+        "route_risk": "low — Malacca Strait severity none, Suez +$450",
         "overall": "low"
-      },
-      "reasoning": "120+ word analyst paragraph citing specific signal data..."
+      }
     }
   ]
 }`;
 
-// ─── Agent ───────────────────────────────────────────────────────────────────
+// ─── Agent ─────────────────────────────────────────────────────────────────
 
 export class OptionRankerAgent extends Agent {
   readonly name = "option-ranker";
   readonly tier = "mercury" as const;
 
   async process(input: unknown): Promise<OptionRankerOutput> {
-    const { shipmentId, intent_data } = input as {
+    const { shipmentId, candidates, intent_data } = input as {
       shipmentId: string;
-      intent_data?: Record<string, unknown>;
+      candidates: OptionCandidate[];
+      intent_data: Record<string, unknown>;
     };
 
+    if (!candidates || candidates.length === 0) {
+      throw new Error("option-ranker called with no candidates");
+    }
+
     const allSignals = await getSignalsForShipment(shipmentId);
-    // Exclude orchestrator meta-signals
-    const sourcingSignals = allSignals.filter(
-      (s) => s.agent_name !== "orchestrator"
-    );
+    const byAgent = signalsByAgent(allSignals as Signal[]);
 
-    const intent = intent_data ?? {};
-    const context = buildContext(sourcingSignals as Signal[], intent);
+    // Build context block — Mercury sees raw signal facts + the pre-computed candidates
+    const context = this.buildContext(candidates, byAgent, intent_data);
 
-    const rawResult = await this.callLLMValidated(
+    const result = await this.callLLMValidated(
       [
         { role: "system", content: SYSTEM_PROMPT },
         {
           role: "user",
-          content: `Here is the complete sourcing intelligence for this shipment:\n\n${context}\n\nProduce exactly 3 ranked options from 3 different countries. Apply filtering rules. Return only JSON.`,
+          content: `${context}\n\nProduce ranks 1-${candidates.length} (one per candidate). Return JSON only.`,
         },
       ],
       OptionRankerOutput,
-      { maxTokens: 4000 }
+      { maxTokens: 3500 }
     );
 
-    // Hard-enforce: preferred origin must be rank 1 in code (LLM may slip)
-    const preferredCountry = (intent.origin_country as string | undefined)?.toUpperCase();
-    let options = rawResult.options;
-    if (preferredCountry) {
-      const idx = options.findIndex(o => o.country_code.toUpperCase() === preferredCountry);
-      if (idx > 0) {
-        const [preferred] = options.splice(idx, 1);
-        options = [preferred, ...options];
-        options.forEach((o, i) => { (o as any).rank = i + 1; });
-        console.log(`[option-ranker] hard-enforced ${preferredCountry} to rank 1 (LLM had it at rank ${idx + 1})`);
-      }
-    }
-    const result = { ...rawResult, options };
-
-    // Write each option to the options table
-    const today = new Date();
+    // Re-attach the cost/route data to each option (Mercury only writes reasoning + rank)
+    // Match by origin_port_locode within the same country.
     for (const opt of result.options) {
-      // Upsert supplier record only for real supplier names (not synthetic placeholders)
-      const isSyntheticSupplier = !opt.supplier_name || /\bsupplier\b/i.test(opt.supplier_name);
-      let supplierId: string | null = null;
-      if (!isSyntheticSupplier) {
-        try {
-          const supplier = await upsertSupplier({
-            name: opt.supplier_name!,
-            country: opt.country_code,
-            registry_source: "option-ranker",
-            verification_status: "unverified",
-          });
-          supplierId = supplier.id;
-        } catch {
-          // non-fatal — supplier_id stays null
-        }
-      }
-
-      const eta = new Date(today.getTime() + opt.transit_days * 24 * 60 * 60 * 1000);
+      const cand = candidates.find(
+        (c) =>
+          c.country_code.toUpperCase() === opt.country_code.toUpperCase() &&
+          c.origin_port.locode.toUpperCase() === opt.origin_port_locode.toUpperCase()
+      );
+      if (!cand) continue;
 
       await createOption({
         shipment_id: shipmentId,
         rank: opt.rank,
-        country: opt.country_code,
-        supplier_id: supplierId ?? undefined,
-        route_data: opt.route_data as any,
-        cost_breakdown: opt.cost_breakdown as any,
-        eta,
+        country: cand.country_code,
+        route_data: cand.route_data,
+        cost_breakdown: cand.cost_breakdown as any,
+        eta: cand.eta,
         risk_summary: opt.risk_summary as any,
         reasoning: opt.reasoning,
       });
@@ -344,11 +189,64 @@ export class OptionRankerAgent extends Agent {
       payload: {
         option_count: result.options.length,
         countries: result.options.map((o) => o.country_code),
-        top_landed_cost: result.options[0]?.cost_breakdown.total_landed_cost_usd,
+        ports: result.options.map((o) => o.origin_port_locode),
       },
       confidence: 0.9,
     });
 
     return result;
+  }
+
+  private buildContext(
+    candidates: OptionCandidate[],
+    byAgent: Map<string, Signal[]>,
+    intent: Record<string, unknown>
+  ): string {
+    const lines: string[] = [];
+
+    lines.push("=== SHIPMENT INTENT ===");
+    lines.push(`HS Code: ${intent.hs_code}`);
+    lines.push(`Product: ${intent.product_description}`);
+    lines.push(`Quantity: ${intent.quantity} ${intent.quantity_unit ?? ""}`);
+    lines.push(`Budget: $${intent.budget_usd ?? "unspecified"}`);
+    lines.push(`Deadline: ${intent.deadline_date ?? "unspecified"}`);
+    lines.push(`Destination: ${intent.destination_port ?? "USLAX"}`);
+    if (intent.origin_country) {
+      lines.push(`BUYER-SPECIFIED ORIGIN: ${intent.origin_country}`);
+    }
+
+    lines.push("\n=== CANDIDATES (pre-computed routes with real costs) ===");
+    for (const c of candidates) {
+      lines.push(`\n--- ${c.country_name} (${c.country_code}) via ${c.origin_port.name} [${c.origin_port.locode}] ---`);
+      lines.push(`  Why this port: ${c.port_rationale}`);
+      lines.push(`  Route: ${c.route_data.total_distance_nm}nm, ${c.route_data.total_transit_days}d`);
+      lines.push(`  Chokepoints: ${(c.route_data.chokepoints ?? []).join(" → ") || "(open water)"}`);
+      lines.push(`  Cost breakdown:`);
+      lines.push(`    product:    $${c.cost_breakdown.product_value_usd.toLocaleString()}`);
+      lines.push(`    duty:       ${c.cost_breakdown.total_duty_pct}% (base ${c.cost_breakdown.base_duty_pct ?? 0}% + 301 ${c.cost_breakdown.section_301_pct ?? 0}% + 232 ${c.cost_breakdown.section_232_pct ?? 0}%)`);
+      lines.push(`    freight:    $${c.cost_breakdown.freight_usd.toLocaleString()}`);
+      lines.push(`    tolls:      $${c.cost_breakdown.canal_tolls_usd.toLocaleString()}`);
+      lines.push(`    war risk:   $${c.cost_breakdown.war_risk_premium_usd.toLocaleString()}`);
+      lines.push(`    insurance:  $${c.cost_breakdown.insurance_usd.toLocaleString()}`);
+      lines.push(`    broker:     $${c.cost_breakdown.broker_fee_usd.toLocaleString()}`);
+      lines.push(`  TOTAL LANDED: $${c.cost_breakdown.total_landed_cost_usd.toLocaleString()}`);
+      lines.push(`  Leg analyses:`);
+      for (const ls of c.leg_summaries) {
+        lines.push(`    [${ls.severity}] ${ls.summary}`);
+      }
+    }
+
+    lines.push("\n=== COUNTRY-LEVEL CONTEXT ===");
+    for (const s of byAgent.get("country-risk") ?? []) {
+      const p = s.payload as any;
+      const events = (p.top_events ?? []) as any[];
+      lines.push(`  ${p.country_code} risk: ${p.stability}, top events: ${events.slice(0, 2).map((e) => `[${e.severity}] ${e.headline}`).join(" | ")}`);
+    }
+    for (const s of byAgent.get("compliance-screener") ?? []) {
+      const p = s.payload as any;
+      lines.push(`  ${p.country} compliance: ${p.verdict}, UFLPA=${p.uflpa_flag}`);
+    }
+
+    return lines.join("\n");
   }
 }
