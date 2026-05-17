@@ -29,6 +29,8 @@ import { ProductPricerAgent } from "../product-pricer";
 import type { ProductPriceOutput } from "../product-pricer";
 import { OptionRankerAgent } from "../option-ranker";
 import type { OptionCandidate } from "../option-ranker";
+import { SupplierDiscovererAgent } from "../supplier-discoverer";
+import type { DiscoveredSupplier } from "../supplier-discoverer";
 import { planRoutes } from "../../routing/route-planner";
 import { resolvePortWithFallback } from "../../sources/locations";
 import { FeedbackLoopAgent } from "../feedback-loop";
@@ -195,9 +197,11 @@ class Orchestrator {
   }
 
   private onShipmentConfirmed(payload: PayloadMap["SHIPMENT_CONFIRMED"]) {
-    console.log(`[Orchestrator] SHIPMENT_CONFIRMED ${payload.shipmentId} — starting monitoring agents`);
-    this.startMonitoring(payload.shipmentId, payload.vesselMmsi).catch((err) =>
-      console.error(`[Orchestrator] monitoring start error:`, err)
+    // Monitoring disabled — we've pivoted to supplier-discovery focus.
+    // Still flip shipment status so the UI advances to in_transit.
+    console.log(`[Orchestrator] SHIPMENT_CONFIRMED ${payload.shipmentId} — monitoring disabled, marking in_transit only`);
+    updateShipment(payload.shipmentId, { status: "in_transit" }).catch((err) =>
+      console.error(`[Orchestrator] confirm-status-update failed:`, err)
     );
   }
 
@@ -575,16 +579,15 @@ class Orchestrator {
       `[Orchestrator] Phase 2a complete: ${candidates.length} candidates → ${viableCandidates.length} viable`
     );
 
-    // Phase 2b: Route + supplier-verifier → compliance-screener for each viable candidate
+    // Phase 2b: supplier-verifier → compliance-screener for each viable candidate.
+    // (supplier-discoverer moved to after Phase 2d so we only pay for countries
+    //  that actually become route candidates.)
     await Promise.allSettled(
       viableCandidates.map(async (candidate) => {
         const cc = candidate.country_code;
         const isPreferred = preferredOrigin && cc.toUpperCase() === preferredOrigin;
-        // Pass real supplier name only for the preferred-origin candidate
         const supplierName = isPreferred ? (intent.supplier ?? null) : null;
 
-        // (route-prescorer removed — route-planner + leg-analyzer handle routing in Phase 2d/2e)
-        // supplier-verifier first, then feed parent_companies to compliance-screener
         let parentCompanies: string[] = [];
         try {
           const verifierResult = await this.dispatchCapped("supplier-verifier", shipmentId, {
@@ -593,9 +596,7 @@ class Orchestrator {
             shipmentId,
           });
           const topMatch = (verifierResult as any)?.match_candidates?.[0];
-          if (topMatch?.parent_company) {
-            parentCompanies = [topMatch.parent_company];
-          }
+          if (topMatch?.parent_company) parentCompanies = [topMatch.parent_company];
         } catch (err: any) {
           console.error(`[Orchestrator] supplier-verifier failed for ${cc}:`, err.message);
         }
@@ -732,6 +733,34 @@ class Orchestrator {
 
     console.log(`[Orchestrator] Phase 2d: ${routeCandidates.length} route candidates planned`);
 
+    // ── Phase 2d.5: Supplier discovery for ONLY the countries that became route candidates ──
+    // Run in parallel since they're independent. This avoids burning calls on
+    // candidates that got discarded earlier or never became routes.
+    const suppliersByCountry = new Map<string, DiscoveredSupplier[]>();
+    const discoveryCountries = Array.from(new Set(routeCandidates.map((r) => r.cc.toUpperCase())));
+    console.log(`[Orchestrator] Phase 2d.5: dispatching supplier-discoverer for ${discoveryCountries.length} route countries: ${discoveryCountries.join(", ")}`);
+
+    await Promise.allSettled(
+      discoveryCountries.map(async (cc) => {
+        try {
+          const result = await this.dispatchCapped("supplier-discoverer", shipmentId, {
+            shipmentId,
+            hs_code: hsCode,
+            country: cc,
+            product_description: intent.product_description,
+            quantity: intent.quantity,
+            quantity_unit: intent.quantity_unit,
+          }, 30_000);
+          const suppliers = (result as any)?.suppliers ?? [];
+          if (suppliers.length > 0) suppliersByCountry.set(cc, suppliers);
+        } catch (err: any) {
+          console.error(`[Orchestrator] supplier-discoverer failed for ${cc}:`, err.message);
+        }
+      })
+    );
+
+    console.log(`[Orchestrator] Phase 2d.5: suppliers found for ${suppliersByCountry.size}/${discoveryCountries.length} countries`);
+
     // ── Phase 2e: Per-leg + per-route analysis fan-out ──
     // Dedupe legs by chokepoint sequence so we don't analyse the same Suez→Gibraltar leg twice.
     const uniqueLegs = new Map<string, RouteCandidateRaw["route"]["legs"][number]>();
@@ -857,6 +886,7 @@ class Orchestrator {
           transshipment_ports: rc.route.transshipment_ports,
           total_distance_nm: rc.route.total_distance_nm,
           total_transit_days: rc.route.total_transit_days,
+          suppliers: suppliersByCountry.get(rc.cc.toUpperCase()) ?? [],
         },
         cost_breakdown: {
           product_value_usd: productValue,
@@ -955,6 +985,9 @@ export function registerAllAgents() {
   );
   orchestrator.register("supplier-verifier", (payload) =>
     new SupplierVerifierAgent().run(payload) as Promise<unknown>
+  );
+  orchestrator.register("supplier-discoverer", (payload) =>
+    new SupplierDiscovererAgent().run(payload) as Promise<unknown>
   );
   orchestrator.register("country-risk", (payload) =>
     new CountryRiskAgent().run(payload) as Promise<unknown>

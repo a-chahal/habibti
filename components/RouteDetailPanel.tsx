@@ -40,6 +40,7 @@ export default function RouteDetailPanel({
   const originPort = route?.origin_port ?? route?.origin ?? null;
   const destPort = route?.destination_port ?? route?.destination ?? null;
   const legs: any[] = Array.isArray(route?.legs) ? route!.legs : [];
+  const suppliers: any[] = Array.isArray(route?.suppliers) ? route!.suppliers : [];
   const totalDistance = route?.total_distance_nm;
   const totalTransit = route?.total_transit_days ?? route?.typical_transit_days;
 
@@ -135,6 +136,64 @@ export default function RouteDetailPanel({
               </span>
             </div>
             <div className="text-xs text-white/30">{supplier.country}</div>
+          </Section>
+        )}
+
+        {/* Real exporters discovered via web search */}
+        {suppliers.length > 0 && (
+          <Section title={`Real Exporters — ${suppliers.length} found`}>
+            <div className="space-y-3">
+              {suppliers.slice(0, 5).map((s, i) => (
+                <div key={i} className="border-l-2 border-emerald-700/40 pl-3 py-1">
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="min-w-0">
+                      <div className="text-xs font-medium text-white/85 truncate">{s.name}</div>
+                      <div className="text-[10px] text-white/40 mt-0.5">
+                        {[s.city, s.country].filter(Boolean).join(", ") || "—"}
+                      </div>
+                    </div>
+                    {s.registry_verified && (
+                      <span className="text-[9px] px-1.5 py-0.5 rounded font-mono bg-green-900/40 text-green-300 shrink-0">
+                        GLEIF ✓
+                      </span>
+                    )}
+                  </div>
+                  {s.products && (
+                    <p className="text-[11px] text-white/55 mt-1 leading-snug">{s.products}</p>
+                  )}
+                  <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 mt-1.5">
+                    {s.website && (
+                      <a
+                        href={s.website}
+                        target="_blank"
+                        rel="noreferrer noopener"
+                        className="text-[10px] text-emerald-400/80 hover:text-emerald-300 underline underline-offset-2"
+                      >
+                        website
+                      </a>
+                    )}
+                    {s.evidence_url && s.evidence_url !== s.website && (
+                      <a
+                        href={s.evidence_url}
+                        target="_blank"
+                        rel="noreferrer noopener"
+                        className="text-[10px] text-white/40 hover:text-white/70 underline underline-offset-2"
+                      >
+                        source
+                      </a>
+                    )}
+                    {s.min_order && (
+                      <span className="text-[10px] text-white/40 font-mono">MOQ: {s.min_order}</span>
+                    )}
+                    {typeof s.confidence === "number" && (
+                      <span className="text-[10px] text-white/30 font-mono">
+                        conf {Math.round(s.confidence * 100)}%
+                      </span>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
           </Section>
         )}
 

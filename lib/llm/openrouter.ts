@@ -43,6 +43,8 @@ export interface CallOpts {
   json?: boolean;
   temperature?: number;
   maxTokens?: number;
+  /** Enable OpenRouter's built-in web-search plugin (Exa-backed). Adds ~$0.02/call. */
+  web?: boolean;
 }
 
 interface OpenRouterResponse {
@@ -77,6 +79,7 @@ async function call(
     max_tokens: opts.maxTokens ?? 2048,
   };
   if (opts.json) body.response_format = { type: "json_object" };
+  if (opts.web) body.plugins = [{ id: "web" }];
 
   let res: Response;
   try {

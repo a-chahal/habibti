@@ -234,6 +234,14 @@ export class OptionRankerAgent extends Agent {
       for (const ls of c.leg_summaries) {
         lines.push(`    [${ls.severity}] ${ls.summary}`);
       }
+      const suppliers = (c.route_data?.suppliers ?? []) as Array<{ name: string; city?: string | null; website?: string | null; registry_verified?: boolean }>;
+      if (suppliers.length > 0) {
+        lines.push(`  Real exporters discovered (web-verified):`);
+        for (const s of suppliers.slice(0, 4)) {
+          const badge = s.registry_verified ? " [GLEIF✓]" : "";
+          lines.push(`    • ${s.name}${s.city ? " — " + s.city : ""}${badge}${s.website ? " (" + s.website + ")" : ""}`);
+        }
+      }
     }
 
     lines.push("\n=== COUNTRY-LEVEL CONTEXT ===");
