@@ -14,11 +14,14 @@ interface GeoJSONFeature {
 }
 
 interface GlobeRoute {
+  arcId?: string;
+  optionId?: string;
   lat1: number;
   lon1: number;
   lat2: number;
   lon2: number;
   color?: string;
+  opacity?: number;
 }
 
 interface GlobeMarker {
@@ -35,6 +38,7 @@ interface GlobeProps {
   arcHeightMultiplier?: number;
   routeThickness?: number;
   markers?: GlobeMarker[];
+  onArcClick?: (optionId: string, arcId: string) => void;
 }
 
 export default function ThreeJSGlobeWithDots({
@@ -42,7 +46,10 @@ export default function ThreeJSGlobeWithDots({
   arcHeightMultiplier = 0.4,
   routeThickness = 0.005,
   markers = [],
+  onArcClick,
 }: GlobeProps) {
+  const onArcClickRef = useRef(onArcClick);
+  useEffect(() => { onArcClickRef.current = onArcClick; }, [onArcClick]);
   const mountRef = useRef<HTMLDivElement>(null);
   const globeGroupRef = useRef<THREE.Group | null>(null);
 
@@ -299,6 +306,15 @@ export default function ThreeJSGlobeWithDots({
 
       if (autoRotate) {
         globeGroup.rotation.y += 0.003;
+        // Elegant cosmic figure-8 tilting over two full horizontal rotation cycles (4 * Math.PI)
+        const theta = globeGroup.rotation.y;
+        const maxTilt = 0.15; // Subtle and extremely premium 8.5-degree wobble
+        globeGroup.rotation.x = maxTilt * Math.sin(theta / 2);
+        globeGroup.rotation.z = maxTilt * Math.sin(theta);
+      } else {
+        // Smoothly return axis tilts back to level during manual orbit controls interaction
+        globeGroup.rotation.x += (0 - globeGroup.rotation.x) * 0.08;
+        globeGroup.rotation.z += (0 - globeGroup.rotation.z) * 0.08;
       }
 
       const distance = camera.position.length();
@@ -359,11 +375,48 @@ export default function ThreeJSGlobeWithDots({
     };
     window.addEventListener('resize', handleResize);
 
+    // Arc click handling — with drag-detection guard so globe rotation doesn't trigger clicks
+    let mouseDownX = 0;
+    let mouseDownY = 0;
+
+    const onMouseDown = (e: MouseEvent) => {
+      mouseDownX = e.clientX;
+      mouseDownY = e.clientY;
+    };
+
+    const onCanvasClick = (e: MouseEvent) => {
+      if (!mountRef.current || !onArcClickRef.current) return;
+      const dx = e.clientX - mouseDownX;
+      const dy = e.clientY - mouseDownY;
+      if (Math.hypot(dx, dy) > 6) return; // was a drag, not a tap
+
+      const rect = mountRef.current.getBoundingClientRect();
+      const x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+      const y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+
+      const mouse = new THREE.Vector2(x, y);
+      const clickRay = new THREE.Raycaster();
+      clickRay.setFromCamera(mouse, camera);
+
+      const hits = clickRay.intersectObjects(routeMeshesRef.current, false);
+      if (hits.length > 0) {
+        const { optionId, arcId } = hits[0].object.userData as { optionId?: string; arcId?: string };
+        if (onArcClickRef.current) {
+          onArcClickRef.current(optionId ?? "", arcId ?? "");
+        }
+      }
+    };
+
+    renderer.domElement.addEventListener('mousedown', onMouseDown);
+    renderer.domElement.addEventListener('click', onCanvasClick);
+
     // Store ref values to clean up properly
     const currentMount = mountRef.current;
 
     return () => {
       window.removeEventListener('resize', handleResize);
+      renderer.domElement.removeEventListener('mousedown', onMouseDown);
+      renderer.domElement.removeEventListener('click', onCanvasClick);
       cancelAnimationFrame(animationFrameId);
       controls.dispose();
       renderer.dispose();
@@ -423,15 +476,21 @@ export default function ThreeJSGlobeWithDots({
         points.push(pt);
       }
 
+      const arcOpacity = route.opacity ?? 0.9;
       const curve = new THREE.CatmullRomCurve3(points);
       const geometry = new THREE.TubeGeometry(curve, 64, routeThickness, 8, false);
       const material = new THREE.MeshBasicMaterial({
         color: route.color ?? '#ffffff',
         transparent: true,
-        opacity: 0.9,
+        opacity: arcOpacity,
       });
 
       const routeMesh = new THREE.Mesh(geometry, material);
+      // Store identifiers for click raycasting
+      routeMesh.userData = {
+        arcId: route.arcId ?? null,
+        optionId: route.optionId ?? null,
+      };
       group.add(routeMesh);
       routeMeshesRef.current.push(routeMesh);
     });

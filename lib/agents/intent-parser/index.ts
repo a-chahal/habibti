@@ -142,23 +142,25 @@ export function resolvePort(locationText: string): { code: string; country: stri
 }
 
 export const IntentOutput = z.object({
-  hs_code: z.string(),
+  hs_code: z.string().nullable().optional(),
   hs_candidates: z
     .array(z.object({ code: z.string(), description: z.string(), confidence: z.number() }))
-    .optional(),
-  product_description: z.string(),
+    .optional()
+    .nullable(),
+  product_description: z.string().nullable().optional(),
   quantity: z
     .union([z.number(), z.string().transform((s) => (s === "" ? null : Number(s)))])
-    .nullable(),
-  quantity_unit: z.string().nullable(),
-  origin_country: z.string().nullable(),
-  supplier: z.string().nullable(),
-  destination_port: z.string().nullable(),
-  destination_country: z.string().nullable(),
-  deadline_date: z.string().nullable(),
-  budget_usd: z.number().nullable(),
-  notes: z.string().nullable().default(""),
-  clarification_needed: z.string().nullable(),
+    .nullable()
+    .optional(),
+  quantity_unit: z.string().nullable().optional(),
+  origin_country: z.string().nullable().optional(),
+  supplier: z.string().nullable().optional(),
+  destination_port: z.string().nullable().optional(),
+  destination_country: z.string().nullable().optional(),
+  deadline_date: z.string().nullable().optional(),
+  budget_usd: z.number().nullable().optional(),
+  notes: z.string().nullable().optional().default(""),
+  clarification_needed: z.string().nullable().optional(),
 });
 
 export type IntentOutput = z.infer<typeof IntentOutput>;

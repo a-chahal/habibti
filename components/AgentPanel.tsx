@@ -15,22 +15,22 @@ interface AgentCard {
 }
 
 const AGENT_META: Record<string, { tier: "mercury" | "sonnet" | "opus"; type: "sourcing" | "monitoring"; label: string }> = {
-  "intent-parser": { tier: "sonnet", type: "sourcing", label: "Intent Parser" },
-  "country-discoverer": { tier: "sonnet", type: "sourcing", label: "Country Discoverer" },
+  "intent-parser": { tier: "mercury", type: "sourcing", label: "Intent Parser" },
+  "country-discoverer": { tier: "mercury", type: "sourcing", label: "Country Discoverer" },
   "tariff-calculator": { tier: "mercury", type: "sourcing", label: "Tariff Calculator" },
-  "country-risk": { tier: "sonnet", type: "sourcing", label: "Country Risk" },
+  "country-risk": { tier: "mercury", type: "sourcing", label: "Country Risk" },
   "route-prescorer": { tier: "mercury", type: "sourcing", label: "Route Prescorer" },
-  "supplier-verifier": { tier: "sonnet", type: "sourcing", label: "Supplier Verifier" },
+  "supplier-verifier": { tier: "mercury", type: "sourcing", label: "Supplier Verifier" },
   "compliance-screener": { tier: "mercury", type: "sourcing", label: "Compliance Screener" },
-  "option-ranker": { tier: "opus", type: "sourcing", label: "Option Ranker" },
+  "option-ranker": { tier: "mercury", type: "sourcing", label: "Option Ranker" },
   "vessel-tracker": { tier: "mercury", type: "monitoring", label: "Vessel Tracker" },
   "port-congestion": { tier: "mercury", type: "monitoring", label: "Port Congestion" },
   "weather-hazard": { tier: "mercury", type: "monitoring", label: "Weather Hazard" },
-  "corridor-news": { tier: "sonnet", type: "monitoring", label: "Corridor News" },
+  "corridor-news": { tier: "mercury", type: "monitoring", label: "Corridor News" },
   "regulatory-watcher": { tier: "mercury", type: "monitoring", label: "Regulatory Watcher" },
-  "synthesizer": { tier: "opus", type: "monitoring", label: "Synthesizer" },
-  "feedback-loop": { tier: "sonnet", type: "monitoring", label: "Feedback Loop" },
-  "orchestrator": { tier: "sonnet", type: "sourcing", label: "Orchestrator" },
+  "synthesizer": { tier: "mercury", type: "monitoring", label: "Synthesizer" },
+  "feedback-loop": { tier: "mercury", type: "monitoring", label: "Feedback Loop" },
+  "orchestrator": { tier: "mercury", type: "sourcing", label: "Orchestrator" },
 };
 
 const TIER_BADGE: Record<string, string> = {

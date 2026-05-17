@@ -10,6 +10,7 @@ import { useBeliefsStore } from "@/lib/stores/beliefsStore";
 import { useAlertsStore } from "@/lib/stores/alertsStore";
 import AgentPanel from "@/components/AgentPanel";
 import RouteDetailPanel from "@/components/RouteDetailPanel";
+import InProgressRoutePanel from "@/components/InProgressRoutePanel";
 import HandoffAnimation from "@/components/HandoffAnimation";
 import AlertCard from "@/components/AlertCard";
 import EmailCard from "@/components/EmailCard";
@@ -23,6 +24,48 @@ const RISK_COLORS_HEX: Record<string, string> = {
   medium: "#f59e0b",
   high: "#ef4444",
 };
+
+// Port lat/lon for major exporting countries — used to draw candidate arcs from route_prescore signals
+const COUNTRY_PORT: Record<string, { lat: number; lon: number }> = {
+  CN: { lat: 31.23, lon: 121.47 },  // Shanghai
+  VN: { lat: 10.82, lon: 106.63 }, // Ho Chi Minh
+  IN: { lat: 18.93, lon: 72.84 },  // Mumbai
+  BD: { lat: 22.35, lon: 91.82 },  // Chittagong
+  TH: { lat: 13.09, lon: 100.60 }, // Bangkok
+  ID: { lat: -6.09, lon: 106.88 }, // Jakarta
+  MY: { lat: 3.10,  lon: 101.59 }, // Klang
+  KR: { lat: 37.45, lon: 126.69 }, // Incheon
+  JP: { lat: 35.45, lon: 139.64 }, // Yokohama
+  TW: { lat: 25.15, lon: 121.77 }, // Keelung
+  MX: { lat: 20.96, lon: -97.35 }, // Veracruz
+  DE: { lat: 53.55, lon: 9.99 },   // Hamburg
+  TR: { lat: 41.01, lon: 28.98 },  // Istanbul
+  BR: { lat: -23.96, lon: -46.33 }, // Santos
+  PK: { lat: 24.86, lon: 67.01 },  // Karachi
+  KH: { lat: 10.62, lon: 103.50 }, // Sihanoukville
+  LK: { lat: 6.93,  lon: 79.85 },  // Colombo
+  PH: { lat: 14.54, lon: 120.98 }, // Manila
+  HK: { lat: 22.29, lon: 114.16 }, // Hong Kong
+  SG: { lat: 1.29,  lon: 103.82 }, // Singapore
+};
+
+// Destination port coords for common US gateway ports
+const DEST_PORT: Record<string, { lat: number; lon: number }> = {
+  USLAX: { lat: 33.74,  lon: -118.26 },
+  USLGB: { lat: 33.76,  lon: -118.19 },
+  USSEA: { lat: 47.61,  lon: -122.33 },
+  USNYC: { lat: 40.64,  lon: -74.04  },
+  USHOU: { lat: 29.73,  lon: -94.98  },
+  USSAV: { lat: 32.08,  lon: -81.09  },
+};
+
+function guessDestPort(locode: string | null | undefined): { lat: number; lon: number } {
+  if (locode) {
+    const key = locode.toUpperCase().replace(/\s/g, "");
+    if (DEST_PORT[key]) return DEST_PORT[key];
+  }
+  return DEST_PORT.USLAX; // sensible default
+}
 
 const LOADING_MESSAGES = [
   "Analyzing candidate suppliers across 6 countries…",
@@ -219,6 +262,7 @@ export default function ShipmentPage({ params }: { params: { id: string } }) {
   // Panel state
   const [selectedOptionId, setSelectedOptionId] = useState<string | null>(null);
   const [activeArcId, setActiveArcId] = useState<string | null>(null);
+  const [selectedRouteSignal, setSelectedRouteSignal] = useState<any | null>(null);
   const [handoffActive, setHandoffActive] = useState(false);
   const [emailAlert, setEmailAlert] = useState<any | null>(null);
 
@@ -249,12 +293,13 @@ export default function ShipmentPage({ params }: { params: { id: string } }) {
     return null;
   };
 
-  // Build map arcs from options — one arc per leg of each route
+  // Build map arcs — candidate arcs from signals + confirmed option arcs
   const mapArcs = useMemo(() => {
     const buildLegsForOption = (opt: any, active: boolean) => {
       const rd = opt.route_data as any;
       const overall = (opt.risk_summary as any)?.overall ?? "low";
       const legs: any[] = rd?.legs ?? [];
+      const opacityBase = active ? 0.95 : 0.6;
 
       // New shape: emit one arc per leg
       if (legs.length > 0) {
@@ -262,16 +307,17 @@ export default function ShipmentPage({ params }: { params: { id: string } }) {
           .map((leg: any, i: number) => {
             const from = leg.from, to = leg.to;
             if (from?.lat == null || to?.lat == null) return null;
-            // Per-leg severity wins; fall back to option overall
             const legSev = leg.risk_severity && leg.risk_severity !== "none" ? leg.risk_severity : overall;
             return {
               id: `${opt.id}-leg-${i}`,
+              optionId: opt.id,
               lat1: from.lat,
               lon1: from.lon ?? from.lng,
               lat2: to.lat,
               lon2: to.lon ?? to.lng,
-              risk: legSev,
+              risk: legSev as "low" | "medium" | "high",
               active,
+              opacity: opacityBase,
             };
           })
           .filter((a): a is NonNullable<typeof a> => a !== null);
@@ -283,12 +329,14 @@ export default function ShipmentPage({ params }: { params: { id: string } }) {
       if (!origin || !dest) return [];
       return [{
         id: opt.id,
+        optionId: opt.id,
         lat1: origin.lat,
         lon1: origin.lon,
         lat2: dest.lat,
         lon2: dest.lon,
-        risk: overall,
+        risk: overall as "low" | "medium" | "high",
         active,
+        opacity: opacityBase,
       }];
     };
 
@@ -298,8 +346,150 @@ export default function ShipmentPage({ params }: { params: { id: string } }) {
       return buildLegsForOption(sel, true);
     }
 
-    return shipment.options.flatMap(opt => buildLegsForOption(opt, opt.id === activeArcId));
-  }, [shipment.options, selectedOptionId, activeArcId, isInTransit]);
+    // Candidate, Refined, and Discarded arcs from route_discovered signals — shown progressively during sourcing
+    const candidateArcs: any[] = [];
+    if (isSourceing || isSourcingComplete) {
+      // Find all route_discovered signals
+      const routeDiscoveredSignals = signals.filter(s => s.signal_type === "route_discovered");
+
+      // Group by ID to ensure we only render the latest status for each route candidate
+      const latestSignalsMap = new Map<string, typeof routeDiscoveredSignals[number]>();
+      routeDiscoveredSignals.forEach(sig => {
+        const payload = sig.payload as any;
+        const id = payload?.id || `cand-${payload?.country_code}`;
+        if (!latestSignalsMap.has(id)) {
+          latestSignalsMap.set(id, sig);
+        } else {
+          // If we find a newer state (e.g. status: refined or status: discarded is more recent than status: candidate),
+          // keep the most recently recorded or higher-priority status.
+          const existing = latestSignalsMap.get(id)!.payload as any;
+          if (payload.status === "discarded" || (payload.status === "refined" && existing.status === "candidate")) {
+            latestSignalsMap.set(id, sig);
+          }
+        }
+      });
+
+      latestSignalsMap.forEach((sig) => {
+        const p = sig.payload as any;
+        const status = p.status as "candidate" | "refined" | "discarded";
+        const routeData = p.route;
+        const legs = routeData?.legs ?? [];
+        const countryCode = p.country_code;
+
+        // Custom styling based on progressive status
+        let color = "#818cf8"; // indigo-400 for candidate
+        let opacity = 0.25;
+        if (status === "refined") {
+          color = "#22d3ee"; // cyan-400 for refined
+          opacity = 0.5;
+        } else if (status === "discarded") {
+          color = "#ef4444"; // red-500 for discarded
+          opacity = 0.15;
+        }
+
+        const arcId = p.id || `cand-${countryCode}`;
+
+        if (legs.length > 0) {
+          legs.forEach((leg: any, idx: number) => {
+            if (leg.from?.lat != null && leg.to?.lat != null) {
+              candidateArcs.push({
+                id: arcId, // link back to the signal ID for click detection
+                optionId: undefined, // this is in-progress, not a finalized option card
+                lat1: leg.from.lat,
+                lon1: leg.from.lon ?? leg.from.lng,
+                lat2: leg.to.lat,
+                lon2: leg.to.lon ?? leg.to.lng,
+                active: false,
+                opacity,
+                color,
+              });
+            }
+          });
+        } else if (p.lat1 != null && p.lat2 != null) {
+          // Simple direct arc fallback
+          candidateArcs.push({
+            id: arcId,
+            optionId: undefined,
+            lat1: p.lat1,
+            lon1: p.lon1,
+            lat2: p.lat2,
+            lon2: p.lon2,
+            active: false,
+            opacity,
+            color,
+          });
+        }
+      });
+
+      // Keep support for legacy route_prescore signals just in case
+      const seenCountries = new Set<string>();
+      signals
+        .filter(s => s.signal_type === "route_prescore")
+        .forEach(sig => {
+          const p = sig.payload as any;
+          const countryCode = (p?.origin_country ?? "").toUpperCase().slice(0, 2);
+          const destLocode = (p?.destination_port ?? "").toUpperCase();
+          if (!countryCode || seenCountries.has(countryCode)) return;
+          seenCountries.add(countryCode);
+
+          const srcPort = COUNTRY_PORT[countryCode];
+          const dstPort = guessDestPort(destLocode);
+          if (!srcPort) return;
+
+          // Only add if not already covered by our premium route_discovered signals
+          if (latestSignalsMap.has(`cand-${countryCode}`) || latestSignalsMap.has(`refined-${countryCode}-${p.origin_port}`)) return;
+
+          const routes: any[] = p?.routes ?? [];
+          const waypoints: any[] = routes[0]?.waypoints ?? [];
+
+          if (waypoints.length >= 2) {
+            for (let i = 0; i < waypoints.length - 1; i++) {
+              candidateArcs.push({
+                id: `cand-${countryCode}`,
+                optionId: undefined,
+                lat1: waypoints[i].lat,
+                lon1: waypoints[i].lon,
+                lat2: waypoints[i + 1].lat,
+                lon2: waypoints[i + 1].lon,
+                risk: "low" as const,
+                active: false,
+                opacity: 0.18,
+              });
+            }
+            candidateArcs.push({
+              id: `cand-${countryCode}`,
+              optionId: undefined,
+              lat1: srcPort.lat,
+              lon1: srcPort.lon,
+              lat2: waypoints[0].lat,
+              lon2: waypoints[0].lon,
+              risk: "low" as const,
+              active: false,
+              opacity: 0.18,
+            });
+          } else {
+            candidateArcs.push({
+              id: `cand-${countryCode}`,
+              optionId: undefined,
+              lat1: srcPort.lat,
+              lon1: srcPort.lon,
+              lat2: dstPort.lat,
+              lon2: dstPort.lon,
+              risk: "low" as const,
+              active: false,
+              opacity: 0.18,
+            });
+          }
+        });
+    }
+
+    // Final option arcs (brighter) — appear progressively as options are computed
+    const optionArcs = shipment.options.flatMap(opt =>
+      buildLegsForOption(opt, opt.id === activeArcId)
+    );
+
+    return [...candidateArcs, ...optionArcs];
+  }, [signals, shipment.options, selectedOptionId, activeArcId, isInTransit, isSourceing, isSourcingComplete]);
 
   // Build map markers — origin ports, destination, and chokepoint waypoints along each route
   const mapMarkers = useMemo(() => {
@@ -368,6 +558,38 @@ export default function ShipmentPage({ params }: { params: { id: string } }) {
     }).catch(() => {});
   }, [id]);
 
+  // Handle arc click from globe — open option panel or the custom in-progress route overlay
+  const handleArcClick = useCallback((optionId: string, arcId: string) => {
+    if (optionId) {
+      setActiveArcId(prev => prev === optionId ? null : optionId);
+      setSelectedRouteSignal(null);
+    } else if (arcId) {
+      // It's an in-progress candidate signal
+      const matchingSignal = signals.find(s => 
+        s.signal_type === "route_discovered" && 
+        (s.payload as any)?.id === arcId
+      );
+      if (matchingSignal) {
+        setSelectedRouteSignal((prev: any) => prev?.id === (matchingSignal.payload as any)?.id ? null : matchingSignal.payload);
+        setActiveArcId(null);
+      } else {
+        // Fallback or pattern-based extraction
+        const parts = arcId.split("-");
+        const countryCode = parts[1];
+        if (countryCode) {
+          const matchingDirect = signals.find(s => 
+            s.signal_type === "route_discovered" && 
+            (s.payload as any)?.country_code === countryCode
+          );
+          if (matchingDirect) {
+            setSelectedRouteSignal((prev: any) => prev?.id === (matchingDirect.payload as any)?.id ? null : matchingDirect.payload);
+            setActiveArcId(null);
+          }
+        }
+      }
+    }
+  }, [signals]);
+
   const handleHandoffComplete = useCallback(() => {
     setHandoffActive(false);
   }, []);
@@ -423,6 +645,7 @@ export default function ShipmentPage({ params }: { params: { id: string } }) {
               mode={isInTransit ? "monitoring" : "sourcing"}
               activeArcId={activeArcId ?? undefined}
               vesselPosition={vesselPos}
+              onArcClick={handleArcClick}
             />
 
             {/* Sourcing overlay */}
@@ -511,6 +734,17 @@ export default function ShipmentPage({ params }: { params: { id: string } }) {
             onClose={() => setActiveArcId(null)}
             onSelect={() => handleSelectOption(selectedOption.id)}
             selecting={handoffActive}
+          />
+        )}
+      </AnimatePresence>
+
+      {/* In-progress candidate route detail panel */}
+      <AnimatePresence>
+        {selectedRouteSignal && (
+          <InProgressRoutePanel
+            key={selectedRouteSignal.id}
+            routeInfo={selectedRouteSignal}
+            onClose={() => setSelectedRouteSignal(null)}
           />
         )}
       </AnimatePresence>

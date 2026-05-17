@@ -43,7 +43,7 @@ const RiskSummary = z.object({
   country_risk: z.string(),
   compliance: z.string(),
   route_risk: z.string(),
-  overall: z.enum(["low", "medium", "high"]),
+  overall: z.enum(["low", "medium", "high", "critical", "extreme"]),
 });
 
 const RankedOption = z.object({

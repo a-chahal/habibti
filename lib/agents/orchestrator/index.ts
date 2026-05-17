@@ -48,6 +48,30 @@ const TYPICAL_TRANSIT: Record<string, number> = {
   MG: 30, PE: 20,
 };
 
+// Port lat/lon coordinates for mapping early country candidate routes
+const COUNTRY_PORT: Record<string, { lat: number; lon: number }> = {
+  CN: { lat: 31.23, lon: 121.47 },  // Shanghai
+  VN: { lat: 10.82, lon: 106.63 }, // Ho Chi Minh
+  IN: { lat: 18.93, lon: 72.84 },  // Mumbai
+  BD: { lat: 22.35, lon: 91.82 },  // Chittagong
+  TH: { lat: 13.09, lon: 100.60 }, // Bangkok
+  ID: { lat: -6.09, lon: 106.88 }, // Jakarta
+  MY: { lat: 3.10,  lon: 101.59 }, // Klang
+  KR: { lat: 37.45, lon: 126.69 }, // Incheon
+  JP: { lat: 35.45, lon: 139.64 }, // Yokohama
+  TW: { lat: 25.15, lon: 121.77 }, // Keelung
+  MX: { lat: 20.96, lon: -97.35 }, // Veracruz
+  DE: { lat: 53.55, lon: 9.99 },   // Hamburg
+  TR: { lat: 41.01, lon: 28.98 },  // Istanbul
+  BR: { lat: -23.96, lon: -46.33 }, // Santos
+  PK: { lat: 24.86, lon: 67.01 },  // Karachi
+  KH: { lat: 10.62, lon: 103.50 }, // Sihanoukville
+  LK: { lat: 6.93,  lon: 79.85 },  // Colombo
+  PH: { lat: 14.54, lon: 120.98 }, // Manila
+  HK: { lat: 22.29, lon: 114.16 }, // Hong Kong
+  SG: { lat: 1.29,  lon: 103.82 }, // Singapore
+};
+
 type AgentHandler = (payload: Record<string, unknown>) => Promise<unknown>;
 
 class Semaphore {
@@ -113,6 +137,9 @@ class Orchestrator {
 
   private async catchUpOnBoot() {
     try {
+      // Do NOT auto-process old unprocessed shipments on server startup/hot-reload to save API costs.
+      // Shipments should only start sourcing when the user explicitly triggers them from the onboarding flow.
+      /*
       const unprocessed = await listUnprocessedShipments();
       if (unprocessed.length > 0) {
         console.log(`[Orchestrator] catch-up: ${unprocessed.length} unprocessed shipment(s) found`);
@@ -122,6 +149,10 @@ class Orchestrator {
           );
         }
       }
+      */
+      // Do NOT auto-start monitoring on server startup/hot-reload to save API costs.
+      // Monitoring should only start when the shipment is explicitly confirmed.
+      /*
       const confirmed = await listConfirmedShipments();
       if (confirmed.length > 0) {
         console.log(`[Orchestrator] catch-up: ${confirmed.length} in-transit shipment(s) found`);
@@ -131,6 +162,7 @@ class Orchestrator {
           );
         }
       }
+      */
     } catch (err) {
       console.error("[Orchestrator] catch-up query failed:", err);
     }
@@ -418,6 +450,52 @@ class Orchestrator {
       ];
     }
 
+    // Resolve destination port early for candidate routing visualization
+    const resolvedDest = await resolvePortWithFallback(destinationPort, destinationCountry);
+    const destPort = resolvedDest || (await resolvePortWithFallback("USLAX", "US")) || { locode: "USLAX", name: "Port of Los Angeles", lat: 33.74, lng: -118.26 };
+
+    // Publish candidate routes immediately on discovery
+    if (destPort) {
+      for (const cand of candidates) {
+        const cc = cand.country_code.toUpperCase();
+        const srcCoord = COUNTRY_PORT[cc];
+        if (srcCoord) {
+          try {
+            const routes = planRoutes(
+              { locode: `${cc}MAIN`, name: `${cand.country_name} Port`, lat: srcCoord.lat, lon: srcCoord.lon },
+              { locode: destPort.locode, name: destPort.name, lat: destPort.lat, lon: destPort.lng },
+              { maxRoutes: 1 }
+            );
+            if (routes[0]) {
+              await createSignal({
+                agent_name: "country-discoverer",
+                signal_type: "route_discovered",
+                severity: "info",
+                shipment_id: shipmentId,
+                payload: {
+                  id: `cand-${cc}`,
+                  country_code: cc,
+                  country_name: cand.country_name,
+                  port_locode: `${cc}MAIN`,
+                  port_name: `${cand.country_name} Main Port`,
+                  lat1: srcCoord.lat,
+                  lon1: srcCoord.lon,
+                  lat2: destPort.lat,
+                  lon2: destPort.lng,
+                  status: "candidate",
+                  route: routes[0],
+                },
+                citations: [],
+                occurred_at: new Date(),
+              });
+            }
+          } catch (err: any) {
+            console.error(`[Orchestrator] failed to plan candidate route signal for ${cc}:`, err.message);
+          }
+        }
+      }
+    }
+
     // Phase 2a: Cheap gate — tariff + country-risk per candidate
     type Phase2aResult = { cc: string; viable: boolean };
     const phase2aResults = new Map<string, Phase2aResult>();
@@ -465,6 +543,27 @@ class Orchestrator {
             (daysToDeadline === null || transit + 5 <= daysToDeadline));
 
         phase2aResults.set(cc, { cc, viable });
+
+        if (!viable) {
+          await createSignal({
+            agent_name: "country-risk",
+            signal_type: "route_discovered",
+            severity: "high",
+            shipment_id: shipmentId,
+            payload: {
+              id: `cand-${cc}`,
+              country_code: cc,
+              status: "discarded",
+              reason: stability === "unstable"
+                ? "Ruled out: Critical political/stability events detected."
+                : tariffPct >= 80
+                ? `Ruled out: Exorbitant import duty (${tariffPct}%).`
+                : "Ruled out: Estimated transit exceeds deadline limit.",
+            },
+            citations: [],
+            occurred_at: new Date(),
+          }).catch(() => {});
+        }
       })
     );
 
@@ -525,6 +624,45 @@ class Orchestrator {
             shipmentId,
           })) as PortDiscovererOutput;
           portsByCountry.set(cand.country_code, result.ports);
+
+          if (!destPort) return;
+
+          // Publish refined route signals for the discovered ports
+          const ports = result.ports.slice(0, 3);
+          for (const port of ports) {
+            try {
+              const routes = planRoutes(
+                { locode: port.locode, name: port.name, lat: port.lat, lon: port.lon },
+                { locode: destPort.locode, name: destPort.name, lat: destPort.lat, lon: destPort.lng },
+                { maxRoutes: 1 }
+              );
+              if (routes[0]) {
+                await createSignal({
+                  agent_name: "port-discoverer",
+                  signal_type: "route_discovered",
+                  severity: "info",
+                  shipment_id: shipmentId,
+                  payload: {
+                    id: `refined-${cand.country_code}-${port.locode}`,
+                    country_code: cand.country_code,
+                    country_name: cand.country_name,
+                    port_locode: port.locode,
+                    port_name: port.name,
+                    lat1: port.lat,
+                    lon1: port.lon,
+                    lat2: destPort.lat,
+                    lon2: destPort.lng,
+                    status: "refined",
+                    route: routes[0],
+                  },
+                  citations: [],
+                  occurred_at: new Date(),
+                });
+              }
+            } catch (err: any) {
+              console.error(`[Orchestrator] failed to plan refined route for ${port.locode}:`, err.message);
+            }
+          }
         } catch (err: any) {
           console.error(`[Orchestrator] port-discoverer failed for ${cand.country_code}:`, err.message);
         }
@@ -537,15 +675,7 @@ class Orchestrator {
     // Resolve destination port — try DB, fall back to the curated KNOWN_PORTS dict,
     // and finally fall back to USLAX so the pipeline never silently dies on an
     // unmapped destination (e.g. USMIA which UN/LOCODE inexplicably omits).
-    let destPort = await resolvePortWithFallback(destinationPort, destinationCountry);
-    if (!destPort) {
-      console.warn(`[Orchestrator] destination port ${destinationPort} not in locations table or KNOWN_PORTS — falling back to USLAX`);
-      destPort = await resolvePortWithFallback("USLAX", "US");
-    }
-    if (!destPort) {
-      console.error(`[Orchestrator] could not resolve any destination port — aborting pipeline`);
-      return;
-    }
+
 
     type RouteCandidateRaw = {
       cc: string;

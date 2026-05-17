@@ -60,8 +60,10 @@ export function usePolling(shipmentId: string | null): PollingState {
         current_belief: snapshot.current_belief ?? null,
       });
 
-      // 2. Options (once sourcing is done)
+      // 2. Options — fetch during all active states so routes appear progressively on the globe
       if (
+        snapshot.status === "draft" ||
+        snapshot.status === "pending" ||
         snapshot.status === "sourcing_complete" ||
         snapshot.status === "in_transit" ||
         snapshot.status === "delayed"
