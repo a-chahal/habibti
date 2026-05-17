@@ -346,8 +346,9 @@ export default function ShipmentPage({ params }: { params: { id: string } }) {
     }
 
     // Candidate, Refined, and Discarded arcs from route_discovered signals — shown progressively during sourcing
+    // Once sourcing completes and the final three options are presented, drop these to avoid stale blue lines.
     const candidateArcs: any[] = [];
-    if (isSourceing || isSourcingComplete) {
+    if (isSourceing) {
       // Find all route_discovered signals
       const routeDiscoveredSignals = signals.filter(s => s.signal_type === "route_discovered");
 
