@@ -44,6 +44,9 @@ const RiskSummary = z.object({
   compliance: z.string(),
   route_risk: z.string(),
   overall: z.enum(["low", "medium", "high", "critical", "extreme"]),
+  // Attached by orchestrator from the compliance-screener signal (not Mercury).
+  uflpa_flag: z.boolean().nullable().optional(),
+  uflpa_rebuttable_presumption: z.boolean().nullable().optional(),
 });
 
 const RankedOption = z.object({
@@ -212,6 +215,22 @@ export class OptionRankerAgent extends Agent {
       if (!cand) continue;
       usedCandidateKeys.add(candKey(cand, cand.route_data?.modality ?? "fcl"));
 
+      // Attach authoritative UFLPA fields from the compliance-screener signal.
+      // Two distinct flags:
+      //   uflpa_flag                       — supplier confirmed on UFLPA Entity List
+      //   uflpa_rebuttable_presumption     — China + watchlist HS chapter (52-63, 85)
+      //                                      → importer must prove non-Xinjiang origin
+      // (Mercury's compliance prose is unreliable for boolean checks.)
+      const complianceSignal = (byAgent.get("compliance-screener") ?? []).find(
+        (s: any) => (s.payload?.country ?? "").toUpperCase() === cand.country_code.toUpperCase(),
+      );
+      const cPayload = (complianceSignal?.payload as any) ?? {};
+      const enrichedRiskSummary = {
+        ...opt.risk_summary,
+        uflpa_flag: cPayload.uflpa_flag === true,
+        uflpa_rebuttable_presumption: cPayload.uflpa_rebuttable_presumption === true,
+      };
+
       await createOption({
         shipment_id: shipmentId,
         rank: opt.rank,
@@ -219,7 +238,7 @@ export class OptionRankerAgent extends Agent {
         route_data: cand.route_data,
         cost_breakdown: cand.cost_breakdown as any,
         eta: cand.eta,
-        risk_summary: opt.risk_summary as any,
+        risk_summary: enrichedRiskSummary as any,
         reasoning: opt.reasoning,
       });
     }

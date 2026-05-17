@@ -51,8 +51,16 @@ export default function RouteDetailPanel({
     ? new Date(option.eta).toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" })
     : null;
 
-  const isUFLPA = supplier?.verification_status?.toLowerCase().includes("uflpa") ||
-    risk?.compliance?.toLowerCase().includes("uflpa");
+  // UFLPA only applies to China-origin imports in specific HS chapters
+  // (textiles 52-63, electronics 85). compliance-screener emits two booleans:
+  //   - uflpa_flag: supplier confirmed on UFLPA Entity List (strong warning)
+  //   - uflpa_rebuttable_presumption: China + watchlist HS chapter — importer
+  //     must prove non-Xinjiang origin (advisory warning)
+  // Don't substring-match the LLM's compliance prose (false-positives on
+  // phrases like "no UFLPA concerns").
+  const uflpaEntityHit = risk?.uflpa_flag === true;
+  const uflpaPresumption = risk?.uflpa_rebuttable_presumption === true;
+  const isUFLPA = uflpaEntityHit || uflpaPresumption;
 
   return (
     <motion.div
@@ -108,11 +116,15 @@ export default function RouteDetailPanel({
               )}
             </div>
           </div>
-          {isUFLPA && (
+          {uflpaEntityHit ? (
             <div className="mt-3 px-3 py-2 bg-red-900/30 border border-red-700/50 rounded-lg text-xs text-red-300">
-              ⚠ UFLPA flag — Uyghur Forced Labor Prevention Act concerns identified
+              ⚠ UFLPA Entity List match — supplier appears on DHS forced-labor list, importation prohibited
             </div>
-          )}
+          ) : uflpaPresumption ? (
+            <div className="mt-3 px-3 py-2 bg-amber-900/25 border border-amber-700/40 rounded-lg text-xs text-amber-300">
+              ⚠ UFLPA rebuttable presumption — China-origin in watchlist HS chapter; importer must document non-Xinjiang sourcing at clearance
+            </div>
+          ) : null}
         </div>
 
         {/* Cost breakdown */}
