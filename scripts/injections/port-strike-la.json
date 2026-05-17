@@ -1,0 +1,30 @@
+{
+  "signal_type": "port_congestion",
+  "severity": "high",
+  "agent_name": "port-congestion",
+  "payload": {
+    "port": "USLAX",
+    "port_name": "Los Angeles",
+    "event_type": "labor_action",
+    "vessel_count": 89,
+    "baseline": 42,
+    "ratio": 2.12,
+    "congested": true,
+    "cause": "strike",
+    "cause_confidence": 0.97,
+    "summary": "ILWU Local 13 work slowdown at LA/Long Beach has created an anchorage queue of 89 vessels — 2.1x the UNCTAD 30-day baseline. Drayage operations severely impacted.",
+    "headline": "LA/Long Beach dockworkers slowdown creates 89-vessel anchorage backup",
+    "ilwu_statement": "ILWU Local 13 announced a work-to-rule action effective immediately at Ports of Los Angeles and Long Beach, citing unresolved contract negotiations.",
+    "estimated_delay_days": 4,
+    "source_url": "https://www.portoflosangeles.org/alerts/2024/labor-action",
+    "gdelt_corroboration": "https://gdelt.example.com/event/la-port-strike-2024-0628"
+  },
+  "citations": [
+    {
+      "url": "https://www.portoflosangeles.org/alerts/2024/labor-action",
+      "title": "Port of Los Angeles operational advisory — labor action",
+      "source": "Port of Los Angeles",
+      "published_at": "2024-06-28T06:00:00Z"
+    }
+  ]
+}

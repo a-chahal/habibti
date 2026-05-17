@@ -1,0 +1,32 @@
+{
+  "signal_type": "gdelt_news",
+  "severity": "high",
+  "agent_name": "corridor-news",
+  "payload": {
+    "source": "GDELT",
+    "event_type": "canal_disruption",
+    "location": "Suez Canal, Egypt",
+    "headline": "Suez Canal Authority announces 5-7 day vessel queuing delays due to unprecedented congestion — northbound and southbound traffic halted",
+    "delay_days_min": 5,
+    "delay_days_max": 7,
+    "affected_traffic": "all northbound and southbound vessels",
+    "canal_authority_statement": "The Suez Canal Authority issued an advisory citing a vessel grounding at kilometer marker 151 causing a traffic backup. Estimated clearance 5-7 days.",
+    "vessels_affected_estimate": 148,
+    "source_url": "https://gdelt.example.com/event/suez-backup-2024-0628",
+    "gdelt_event_id": "GDELT-2024-0628-SUEZ-CONGESTION"
+  },
+  "citations": [
+    {
+      "url": "https://gdelt.example.com/event/suez-backup-2024-0628",
+      "title": "Suez Canal Authority announces 5-7 day vessel queuing delays",
+      "source": "GDELT News Index",
+      "published_at": "2024-06-28T09:00:00Z"
+    },
+    {
+      "url": "https://www.lloydslist.com/ll/sector/containers/article2024062800.htm",
+      "title": "Suez Canal traffic halted as grounding causes major backup",
+      "source": "Lloyd's List",
+      "published_at": "2024-06-28T10:30:00Z"
+    }
+  ]
+}

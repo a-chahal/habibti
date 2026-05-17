@@ -6,6 +6,7 @@ import {
   getShipment,
   createSignal,
   getOptionsForShipment,
+  getSupplier,
 } from "../../db/queries";
 import { IntentParserAgent } from "../intent-parser";
 import type { IntentOutput } from "../intent-parser";
@@ -19,6 +20,20 @@ import { RoutePrescorer } from "../route-prescorer";
 import { OptionRankerAgent } from "../option-ranker";
 import { FeedbackLoopAgent } from "../feedback-loop";
 import { SynthesizerAgent } from "../synthesizer";
+import { VesselTrackerAgent } from "../vessel-tracker";
+import { PortCongestionAgent } from "../port-congestion";
+import { CorridorNewsAgent } from "../corridor-news";
+import { RegulatoryWatcherAgent } from "../regulatory-watcher";
+import { WeatherHazardAgent } from "../weather-hazard";
+import type { MonitoringContext } from "../monitoring-base";
+
+// Approximate transit days per origin country — used in Phase 2a viability gate
+const TYPICAL_TRANSIT: Record<string, number> = {
+  MX: 4, CN: 14, VN: 16, TW: 14, KR: 14, JP: 13, TH: 18,
+  KH: 18, MY: 16, ID: 18, LK: 22, IN: 28, BD: 30,
+  PK: 30, TR: 20, EG: 22, MA: 20, DE: 14, BR: 30, ET: 35,
+  MG: 30, PE: 20,
+};
 
 type AgentHandler = (payload: Record<string, unknown>) => Promise<unknown>;
 
@@ -52,6 +67,13 @@ class Orchestrator {
   private registry = new Map<string, AgentHandler>();
   private started = false;
   private semaphore = new Semaphore(5);
+
+  // Monitoring agents — singletons, each manages its own per-shipment timers
+  private vesselTracker = new VesselTrackerAgent();
+  private portCongestion = new PortCongestionAgent();
+  private corridorNews = new CorridorNewsAgent();
+  private regulatoryWatcher = new RegulatoryWatcherAgent();
+  private weatherHazard = new WeatherHazardAgent();
 
   register(agentName: string, handler: AgentHandler) {
     this.registry.set(agentName, handler);
@@ -91,11 +113,95 @@ class Orchestrator {
   }
 
   private onShipmentConfirmed(payload: PayloadMap["SHIPMENT_CONFIRMED"]) {
-    console.log(`[Orchestrator] SHIPMENT_CONFIRMED ${payload.shipmentId}`);
+    console.log(`[Orchestrator] SHIPMENT_CONFIRMED ${payload.shipmentId} — starting monitoring agents`);
+    this.startMonitoring(payload.shipmentId, payload.vesselMmsi).catch((err) =>
+      console.error(`[Orchestrator] monitoring start error:`, err)
+    );
   }
 
-  private onSignalNew(_payload: PayloadMap["SIGNAL_NEW"]) {
-    // Future: trigger belief-updater
+  async startMonitoring(shipmentId: string, vesselMmsi?: string): Promise<void> {
+    const [shipment, allOptions] = await Promise.all([
+      getShipment(shipmentId),
+      getOptionsForShipment(shipmentId),
+    ]);
+
+    if (!shipment) {
+      console.error(`[Orchestrator] startMonitoring: shipment ${shipmentId} not found`);
+      return;
+    }
+
+    // Use rank-1 as the confirmed option (no selected_option_id column yet)
+    const confirmedOption = allOptions.find((o) => o.rank === 1);
+    const routeData = confirmedOption?.route_data as any;
+
+    // Extract route metadata from option
+    const chokepoints: string[] = routeData?.chokepoints ?? routeData?.routes?.[0]?.chokepoints ?? [];
+    const transshipmentPorts: string[] = routeData?.transshipmentPorts ?? [];
+    const transitDays: number | null = routeData?.routes?.[0]?.typical_transit_days ?? null;
+
+    // Load supplier name if linked
+    let supplierName: string | null = null;
+    if (confirmedOption?.supplier_id) {
+      try {
+        const supplier = await getSupplier(confirmedOption.supplier_id);
+        supplierName = supplier?.name ?? null;
+      } catch {
+        // non-fatal
+      }
+    }
+    // Fall back to intent.supplier
+    if (!supplierName) {
+      supplierName = (shipment.intent as any)?.supplier ?? null;
+    }
+
+    const ctx: MonitoringContext = {
+      shipmentId,
+      hsCode: shipment.hs_code,
+      originCountry: shipment.origin_country,
+      originPort: shipment.origin_port,
+      destinationPort: shipment.destination_port,
+      supplierName,
+      vesselMmsi: vesselMmsi ?? shipment.vessel_mmsi ?? null,
+      expectedEta: confirmedOption?.eta ?? shipment.expected_eta ?? null,
+      transitDays,
+      chokepoints,
+      transshipmentPorts,
+      productDescription: (shipment.intent as any)?.product_description ?? null,
+    };
+
+    // Update shipment status to in_transit
+    try {
+      await updateShipment(shipmentId, { status: "in_transit" });
+    } catch {
+      // non-fatal — may already be in_transit
+    }
+
+    this.vesselTracker.startMonitoring(ctx);
+    this.portCongestion.startMonitoring(ctx);
+    this.corridorNews.startMonitoring(ctx);
+    this.regulatoryWatcher.startMonitoring(ctx);
+    this.weatherHazard.startMonitoring(ctx);
+
+    console.log(`[Orchestrator] all 5 monitoring agents started for ${shipmentId}, eta=${ctx.expectedEta?.toISOString().slice(0, 10) ?? "unknown"}, chokepoints=${chokepoints.join(", ") || "none"}`);
+  }
+
+  private onSignalNew(payload: PayloadMap["SIGNAL_NEW"]) {
+    // Forward vessel_position signals to weather-hazard and corridor-news for position-aware behavior
+    const p = payload as any;
+    if (p.signalType === "vessel_position" && p.shipmentId) {
+      const lat = p.payload?.lat;
+      const lon = p.payload?.lon;
+      const trackIndex = p.payload?.track_index ?? 0;
+      if (typeof lat === "number" && typeof lon === "number") {
+        this.weatherHazard.updateVesselPosition(p.shipmentId, lat, lon, trackIndex);
+        this.corridorNews.updateVesselPosition(p.shipmentId, lat, lon);
+      }
+    }
+    // When vessel emits chokepoint_entered, mark it cleared in corridor-news
+    if (p.signalType === "chokepoint_entered" && p.shipmentId && p.payload?.chokepoint) {
+      // Mark as entered — corridor-news will clear once vessel leaves
+      // For now: after entering a chokepoint, it gets cleared when vessel exits (handled in corridorNews)
+    }
   }
 
   private async dispatch(
@@ -148,17 +254,20 @@ class Orchestrator {
   }
 
   private async applyIntentResult(shipmentId: string, intent: IntentOutput) {
+    // Heuristic: product value = budget / 1.25 (budget includes duty + freight margin)
+    const productValueUsd = intent.budget_usd ? Math.round(intent.budget_usd / 1.25) : 0;
+
     await updateShipment(shipmentId, {
       hs_code: intent.hs_code,
       origin_country: intent.origin_country ?? undefined,
       destination_country: intent.destination_country ?? undefined,
       destination_port: intent.destination_port ?? undefined,
       expected_eta: intent.deadline_date ? new Date(intent.deadline_date) : undefined,
-      intent: intent as any,
+      intent: { ...(intent as any), product_value_usd: productValueUsd },
     });
 
     console.log(
-      `[Orchestrator] intent applied to shipment ${shipmentId}: hs=${intent.hs_code} port=${intent.destination_port} qty=${intent.quantity}${intent.quantity_unit ? " " + intent.quantity_unit : ""}`
+      `[Orchestrator] intent applied to shipment ${shipmentId}: hs=${intent.hs_code} port=${intent.destination_port} qty=${intent.quantity}${intent.quantity_unit ? " " + intent.quantity_unit : ""}${intent.supplier ? " supplier=" + intent.supplier : ""} productValue=$${productValueUsd}`
     );
 
     if (intent.clarification_needed) {
@@ -166,7 +275,7 @@ class Orchestrator {
       return;
     }
 
-    this.runSourcingPipeline(shipmentId, intent).catch((err) =>
+    this.runSourcingPipeline(shipmentId, intent, productValueUsd).catch((err) =>
       console.error(`[Orchestrator] sourcing pipeline failed for ${shipmentId}:`, err)
     );
   }
@@ -191,21 +300,33 @@ class Orchestrator {
     }
   }
 
-  private async runSourcingPipeline(shipmentId: string, intent: IntentOutput) {
+  private async runSourcingPipeline(
+    shipmentId: string,
+    intent: IntentOutput,
+    productValueUsd: number
+  ) {
     const start = Date.now();
     const hsCode = intent.hs_code;
     const destinationPort = intent.destination_port ?? "USLAX";
     const destinationCountry = intent.destination_country ?? "US";
-    const productValue = intent.budget_usd ?? 0;
+    const preferredOrigin = intent.origin_country?.toUpperCase();
+
+    const daysToDeadline = intent.deadline_date
+      ? Math.round((new Date(intent.deadline_date).getTime() - Date.now()) / 86_400_000)
+      : null;
 
     console.log(`[Orchestrator] starting sourcing pipeline for shipment ${shipmentId}`);
 
-    // Phase 1: Country Discoverer — must complete first (its result drives fan-out)
+    // Phase 1: Country Discoverer — must complete first
     let discovererOutput: CountryDiscovererOutput | null = null;
     try {
       discovererOutput = (await this.dispatchCapped("country-discoverer", shipmentId, {
         hs_code: hsCode,
         destination_country: destinationCountry,
+        preferred_origin: preferredOrigin ?? null,
+        quantity: intent.quantity,
+        quantity_unit: intent.quantity_unit,
+        deadline_date: intent.deadline_date,
         shipmentId,
       })) as CountryDiscovererOutput;
       console.log(
@@ -215,78 +336,129 @@ class Orchestrator {
       console.error(`[Orchestrator] country-discoverer failed:`, err.message);
     }
 
-    const candidates = discovererOutput?.candidates ?? [];
+    let candidates = discovererOutput?.candidates ?? [];
 
-    // Phase 2: Fan out 5 agents per candidate country (all capped at 5 concurrent)
-    const phase2Tasks: Promise<unknown>[] = [];
+    // Ensure user's preferred origin is always in the fan-out
+    if (preferredOrigin && !candidates.some((c) => c.country_code.toUpperCase() === preferredOrigin)) {
+      candidates = [
+        {
+          country_code: preferredOrigin,
+          country_name: preferredOrigin,
+          annual_export_volume_usd: 0,
+          us_import_volume_usd: 0,
+          lane_established: true,
+          trend: "stable" as const,
+          citations: [],
+        },
+        ...candidates,
+      ];
+    }
 
-    for (const candidate of candidates) {
-      const cc = candidate.country_code;
+    // Phase 2a: Cheap gate — tariff + country-risk per candidate
+    type Phase2aResult = { cc: string; viable: boolean };
+    const phase2aResults = new Map<string, Phase2aResult>();
 
-      phase2Tasks.push(
-        this.dispatchCapped("tariff-calculator", shipmentId, {
-          hs_code: hsCode,
-          origin_country: cc,
-          product_value_usd: productValue,
-          shipmentId,
-        }).catch((err) =>
-          console.error(`[Orchestrator] tariff-calculator failed for ${cc}:`, err.message)
-        )
-      );
+    await Promise.allSettled(
+      candidates.map(async (candidate) => {
+        const cc = candidate.country_code;
+        const [tariffResult, riskResult] = await Promise.allSettled([
+          this.dispatchCapped("tariff-calculator", shipmentId, {
+            hs_code: hsCode,
+            origin_country: cc,
+            product_value_usd: productValueUsd,
+            quantity: intent.quantity,
+            quantity_unit: intent.quantity_unit,
+            destination_port: destinationPort,
+            product_description: intent.product_description,
+            shipmentId,
+          }),
+          this.dispatchCapped("country-risk", shipmentId, {
+            country_code: cc,
+            hs_code: hsCode,
+            deadline_date: intent.deadline_date,
+            lookback_days: 30,
+            shipmentId,
+          }),
+        ]);
 
-      phase2Tasks.push(
-        this.dispatchCapped("country-risk", shipmentId, {
-          country_code: cc,
-          lookback_days: 30,
-          shipmentId,
-        }).catch((err) =>
-          console.error(`[Orchestrator] country-risk failed for ${cc}:`, err.message)
-        )
-      );
+        const tariffPct =
+          tariffResult.status === "fulfilled"
+            ? ((tariffResult.value as any)?.total_duty_pct ?? 0)
+            : 0;
+        const stability =
+          riskResult.status === "fulfilled"
+            ? ((riskResult.value as any)?.stability ?? "stable")
+            : "stable";
 
-      phase2Tasks.push(
-        this.dispatchCapped("route-prescorer", shipmentId, {
+        const transit = TYPICAL_TRANSIT[cc.toUpperCase()] ?? 25;
+        const isPreferred = preferredOrigin && cc.toUpperCase() === preferredOrigin;
+
+        // Always keep preferred origin; gate others
+        const viable =
+          !!isPreferred ||
+          (tariffPct < 80 &&
+            stability !== "unstable" &&
+            (daysToDeadline === null || transit + 5 <= daysToDeadline));
+
+        phase2aResults.set(cc, { cc, viable });
+      })
+    );
+
+    const viableCandidates = candidates.filter(
+      (c) => phase2aResults.get(c.country_code)?.viable !== false
+    );
+
+    console.log(
+      `[Orchestrator] Phase 2a complete: ${candidates.length} candidates → ${viableCandidates.length} viable`
+    );
+
+    // Phase 2b: Route + supplier-verifier → compliance-screener for each viable candidate
+    await Promise.allSettled(
+      viableCandidates.map(async (candidate) => {
+        const cc = candidate.country_code;
+        const isPreferred = preferredOrigin && cc.toUpperCase() === preferredOrigin;
+        // Pass real supplier name only for the preferred-origin candidate
+        const supplierName = isPreferred ? (intent.supplier ?? null) : null;
+
+        // route-prescorer runs in parallel with supplier/compliance chain
+        const routePromise = this.dispatchCapped("route-prescorer", shipmentId, {
           origin_country: cc,
           destination_port: destinationPort,
+          deadline_date: intent.deadline_date,
           shipmentId,
-        }).catch((err) =>
+        }).catch((err: any) =>
           console.error(`[Orchestrator] route-prescorer failed for ${cc}:`, err.message)
-        )
-      );
+        );
 
-      phase2Tasks.push(
-        this.dispatchCapped("supplier-verifier", shipmentId, {
-          supplier_name: `${candidate.country_name} supplier`,
-          country: cc,
-          shipmentId,
-        }).catch((err) =>
-          console.error(`[Orchestrator] supplier-verifier failed for ${cc}:`, err.message)
-        )
-      );
+        // supplier-verifier first, then feed parent_companies to compliance-screener
+        let parentCompanies: string[] = [];
+        try {
+          const verifierResult = await this.dispatchCapped("supplier-verifier", shipmentId, {
+            supplier_name: supplierName,
+            country: cc,
+            shipmentId,
+          });
+          const topMatch = (verifierResult as any)?.match_candidates?.[0];
+          if (topMatch?.parent_company) {
+            parentCompanies = [topMatch.parent_company];
+          }
+        } catch (err: any) {
+          console.error(`[Orchestrator] supplier-verifier failed for ${cc}:`, err.message);
+        }
 
-      phase2Tasks.push(
-        this.dispatchCapped("compliance-screener", shipmentId, {
-          supplier_name: `${candidate.country_name} supplier`,
+        await this.dispatchCapped("compliance-screener", shipmentId, {
+          supplier_name: supplierName,
           country: cc,
+          hs_code: hsCode,
+          parent_companies: parentCompanies,
           shipmentId,
-        }).catch((err) =>
+        }).catch((err: any) =>
           console.error(`[Orchestrator] compliance-screener failed for ${cc}:`, err.message)
-        )
-      );
-    }
+        );
 
-    if (candidates.length === 0) {
-      const fallbackCountry = intent.origin_country ?? "CN";
-      phase2Tasks.push(
-        this.dispatchCapped("compliance-screener", shipmentId, {
-          supplier_name: `${fallbackCountry} supplier`,
-          country: fallbackCountry,
-          shipmentId,
-        }).catch(() => {})
-      );
-    }
-
-    await Promise.allSettled(phase2Tasks);
+        await routePromise;
+      })
+    );
 
     const sourcing_ms = Date.now() - start;
     const agentNames = [
@@ -298,14 +470,19 @@ class Orchestrator {
       "compliance-screener",
     ];
 
-    // Write sourcing_complete signal so test scripts can observe it cross-process
+    // Write sourcing_complete signal
     try {
       await createSignal({
         agent_name: "orchestrator",
         signal_type: "sourcing_complete",
         severity: "info",
         shipment_id: shipmentId,
-        payload: { agentNames, durationMs: sourcing_ms, candidateCount: candidates.length },
+        payload: {
+          agentNames,
+          durationMs: sourcing_ms,
+          candidateCount: candidates.length,
+          viableCount: viableCandidates.length,
+        },
         citations: [],
         occurred_at: new Date(),
       });
@@ -323,7 +500,10 @@ class Orchestrator {
     try {
       await this.dispatchCapped("option-ranker", shipmentId, {
         shipmentId,
-        intent_data: intent as unknown as Record<string, unknown>,
+        intent_data: {
+          ...(intent as unknown as Record<string, unknown>),
+          product_value_usd: productValueUsd,
+        },
       });
     } catch (err: any) {
       console.error(`[Orchestrator] option-ranker failed for ${shipmentId}:`, err.message);
@@ -366,12 +546,4 @@ export function registerAllAgents() {
   // Synthesizer: event-driven, not dispatched via registry
   const synthesizer = new SynthesizerAgent();
   synthesizer.startListening();
-
-  // Stubs for future prompts
-  for (const name of ["vessel-tracker", "ais-monitor", "belief-updater", "alert-drafter", "options-ranker"]) {
-    orchestrator.register(name, async (payload) => {
-      console.log(`[Stub:${name}] would process`, JSON.stringify(payload).slice(0, 80));
-      return { stub: true, agent: name };
-    });
-  }
 }

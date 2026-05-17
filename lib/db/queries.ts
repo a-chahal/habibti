@@ -1,4 +1,4 @@
-import { eq, desc, and, lt, sql } from "drizzle-orm";
+import { eq, desc, and, lt, sql, gte } from "drizzle-orm";
 import { db } from "./client";
 import {
   shipments,
@@ -12,6 +12,7 @@ import {
   route_history,
   cache,
   sanctions_entities,
+  locations,
 } from "./schema";
 
 // Shipments
@@ -62,10 +63,12 @@ export async function createSignal(data: typeof signals.$inferInsert) {
   return row;
 }
 
-export async function getSignalsForShipment(shipmentId: string) {
+export async function getSignalsForShipment(shipmentId: string, since?: Date) {
   return db.query.signals.findMany({
-    where: eq(signals.shipment_id, shipmentId),
-    orderBy: desc(signals.occurred_at),
+    where: since
+      ? and(eq(signals.shipment_id, shipmentId), gte(signals.recorded_at, since))
+      : eq(signals.shipment_id, shipmentId),
+    orderBy: desc(signals.recorded_at),
   });
 }
 
@@ -88,10 +91,65 @@ export async function createAlert(data: typeof alerts.$inferInsert) {
   return row;
 }
 
-export async function listAlerts(shipmentId?: string) {
+export async function listAlerts(shipmentId?: string, includeDismissed = false) {
   return db.query.alerts.findMany({
-    where: shipmentId ? eq(alerts.shipment_id, shipmentId) : undefined,
+    where: and(
+      shipmentId ? eq(alerts.shipment_id, shipmentId) : undefined,
+      includeDismissed ? undefined : sql`${alerts.status} != 'dismissed'`
+    ),
     orderBy: desc(alerts.created_at),
+  });
+}
+
+export async function dismissAlert(id: string) {
+  const [row] = await db
+    .update(alerts)
+    .set({ status: "dismissed" })
+    .where(eq(alerts.id, id))
+    .returning();
+  return row;
+}
+
+export async function getBeliefHistory(shipmentId: string) {
+  return db.query.beliefs.findMany({
+    where: eq(beliefs.shipment_id, shipmentId),
+    orderBy: desc(beliefs.version),
+  });
+}
+
+export async function getSupplierForShipment(shipmentId: string) {
+  const shipment = await getShipment(shipmentId);
+  if (!shipment?.supplier_id) return null;
+  return getSupplier(shipment.supplier_id);
+}
+
+// Locations
+export async function getLocation(locode: string) {
+  return db.query.locations.findFirst({
+    where: eq(locations.locode, locode.toUpperCase()),
+  });
+}
+
+export async function searchLocations(query: string, country?: string) {
+  return db.query.locations.findMany({
+    where: and(
+      eq(locations.is_port, true),
+      country ? eq(locations.country_code, country.toUpperCase()) : undefined,
+      sql`lower(${locations.name}) like lower(${"%" + query + "%"})`
+    ),
+    limit: 10,
+  });
+}
+
+export async function getPrimaryPortForCountry(countryCode: string) {
+  return db.query.locations.findFirst({
+    where: and(
+      eq(locations.is_port, true),
+      eq(locations.country_code, countryCode.toUpperCase()),
+      sql`${locations.latitude} is not null`,
+      sql`${locations.longitude} is not null`
+    ),
+    orderBy: sql`length(${locations.name}) asc`,
   });
 }
 

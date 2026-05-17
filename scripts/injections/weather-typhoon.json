@@ -1,0 +1,48 @@
+{
+  "signal_type": "weather_hazard",
+  "severity": "high",
+  "agent_name": "weather-hazard",
+  "payload": {
+    "hazard_type": "typhoon",
+    "storm_name": "Typhoon Saomai",
+    "storm_category": 2,
+    "hazard_level": "severe",
+    "affected_waypoints": 3,
+    "waypoints_checked": 6,
+    "current_position": {
+      "lat": 22.5,
+      "lon": 135.0,
+      "timestamp": "2024-06-28T12:00:00Z"
+    },
+    "forecast_track": [
+      { "lat": 24.0, "lon": 131.0, "time": "+24h", "max_wind_kn": 85 },
+      { "lat": 26.5, "lon": 126.0, "time": "+48h", "max_wind_kn": 90 },
+      { "lat": 29.0, "lon": 120.0, "time": "+72h", "max_wind_kn": 75 }
+    ],
+    "hazardous_points": [
+      { "lat": 22.0, "lon": 124.0, "max_wave_m": 6.8, "max_wind_wave_m": 5.2 },
+      { "lat": 30.0, "lon": 140.0, "max_wave_m": 4.9, "max_wind_wave_m": 4.1 },
+      { "lat": 40.0, "lon": 160.0, "max_wave_m": 4.2, "max_wind_wave_m": 3.8 }
+    ],
+    "summary": "Typhoon Saomai (Cat 2) is tracking NW through the Philippine Sea and will intercept the Trans-Pacific lane in the next 48–72 hours. Maximum wave heights of 6.8m forecast near 22°N 124°E. Vessel may need to deviate 200–300nm south to avoid peak severity.",
+    "eta_impact_days": 2,
+    "deviation_recommended": true,
+    "source": "Open-Meteo Marine + NOAA NWS Pacific Typhoon Center",
+    "source_url": "https://www.nhc.noaa.gov/gtwc/",
+    "route": "VN-USLAX"
+  },
+  "citations": [
+    {
+      "url": "https://www.nhc.noaa.gov/gtwc/",
+      "title": "NOAA/NWS Joint Typhoon Warning Center — Typhoon Saomai advisory",
+      "source": "NOAA NWS JTWC",
+      "published_at": "2024-06-28T12:00:00Z"
+    },
+    {
+      "url": "https://marine-api.open-meteo.com/",
+      "title": "Open-Meteo Marine Forecast — waypoints 22.0N 124.0E, 30.0N 140.0E, 40.0N 160.0E",
+      "source": "Open-Meteo",
+      "published_at": "2024-06-28T12:00:00Z"
+    }
+  ]
+}

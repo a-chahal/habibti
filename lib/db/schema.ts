@@ -6,6 +6,7 @@ import {
   timestamp,
   integer,
   numeric,
+  boolean,
   pgEnum,
   index,
 } from "drizzle-orm/pg-core";
@@ -191,6 +192,24 @@ export const cache = pgTable(
     created_at: timestamp("created_at").notNull().defaultNow(),
   },
   (t) => [index("cache_expires_at_idx").on(t.expires_at)]
+);
+
+export const locations = pgTable(
+  "locations",
+  {
+    locode: text("locode").primaryKey(), // e.g. "USLAX"
+    name: text("name").notNull(),
+    country_code: text("country_code").notNull(),
+    subdivision: text("subdivision"),
+    function_codes: text("function_codes"),
+    latitude: numeric("latitude", { precision: 9, scale: 6 }),
+    longitude: numeric("longitude", { precision: 10, scale: 6 }),
+    is_port: boolean("is_port").notNull().default(false),
+  },
+  (t) => [
+    index("locations_country_idx").on(t.country_code),
+    index("locations_name_idx").on(t.name),
+  ]
 );
 
 export const sanctions_entities = pgTable(

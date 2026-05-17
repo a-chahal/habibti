@@ -1,0 +1,34 @@
+{
+  "signal_type": "sanctions_addition",
+  "severity": "critical",
+  "agent_name": "regulatory-watcher",
+  "payload": {
+    "list": "UFLPA",
+    "entity_name": "Xinjiang Baocheng International Cotton Co., Ltd.",
+    "entity_type": "organization",
+    "country": "CN",
+    "region": "Xinjiang, China",
+    "listing_date": "2024-06-28",
+    "reason": "Forced labor in Xinjiang cotton supply chain. Entity procures and processes cotton using labor transferred under the Xinjiang government's labor transfer programs.",
+    "cbl_reference": "CBP-UFLPA-2024-0628-XINJIANG-COTTON",
+    "shipment_impact": "Goods containing fiber sourced from this entity cannot enter the United States without a successful rebuttal presumption waiver from CBP.",
+    "action_required": "Contact customs broker immediately to assess supply chain traceability and prepare UFLPA waiver documentation.",
+    "cbp_guidance_url": "https://www.cbp.gov/trade/forced-labor/UFLPA",
+    "opensanctions_id": "Q_uflpa_xinjiang_baocheng_cotton_2024",
+    "related_commodity_hs": ["5201", "5203", "5208", "6109", "6203"]
+  },
+  "citations": [
+    {
+      "url": "https://www.dhs.gov/uflpa-entity-list",
+      "title": "UFLPA Entity List — Department of Homeland Security",
+      "source": "DHS",
+      "published_at": "2024-06-28T00:00:00Z"
+    },
+    {
+      "url": "https://www.cbp.gov/trade/forced-labor/UFLPA",
+      "title": "CBP UFLPA Guidance — Rebuttable Presumption",
+      "source": "US Customs and Border Protection",
+      "published_at": "2024-06-28T00:00:00Z"
+    }
+  ]
+}

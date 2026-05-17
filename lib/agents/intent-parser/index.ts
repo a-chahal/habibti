@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { Agent } from "../base";
 
-// HS code lookup table for common traded products
+// HS code lookup table — keys use word-boundary matching (see resolveHSCode)
 const HS_LOOKUP: Record<string, { code: string; description: string }> = {
   cotton: { code: "5208", description: "Woven fabrics of cotton" },
   "cotton fabric": { code: "5208", description: "Woven fabrics of cotton" },
@@ -66,13 +66,11 @@ const HS_LOOKUP: Record<string, { code: string; description: string }> = {
   tires: { code: "4011", description: "New pneumatic tyres" },
 };
 
-// Port resolution: city/state → port code + country
+// Port resolution — all keys use word-boundary matching (see resolvePort)
 const PORT_LOOKUP: Record<string, { code: string; country: string; name: string }> = {
   "los angeles": { code: "USLAX", country: "US", name: "Port of Los Angeles" },
-  la: { code: "USLAX", country: "US", name: "Port of Los Angeles" },
   "long beach": { code: "USLGB", country: "US", name: "Port of Long Beach" },
   "new york": { code: "USNYC", country: "US", name: "Port of New York/New Jersey" },
-  ny: { code: "USNYC", country: "US", name: "Port of New York/New Jersey" },
   "new jersey": { code: "USNYC", country: "US", name: "Port of New York/New Jersey" },
   nyc: { code: "USNYC", country: "US", name: "Port of New York/New Jersey" },
   "new york/new jersey": { code: "USNYC", country: "US", name: "Port of New York/New Jersey" },
@@ -110,18 +108,35 @@ const PORT_LOOKUP: Record<string, { code: string; country: string; name: string 
   colombo: { code: "LKCMB", country: "LK", name: "Port of Colombo" },
 };
 
+// Short single-word aliases that could be dangerous substrings — require word boundaries
+const SHORT_PORT_ALIASES: Record<string, { code: string; country: string; name: string }> = {
+  la: { code: "USLAX", country: "US", name: "Port of Los Angeles" },
+  ny: { code: "USNYC", country: "US", name: "Port of New York/New Jersey" },
+};
+
 export function resolveHSCode(productText: string): { code: string; description: string } | null {
   const lower = productText.toLowerCase();
-  for (const [keyword, data] of Object.entries(HS_LOOKUP)) {
-    if (lower.includes(keyword)) return data;
+  // Longer keys first so "cotton fabric" beats "cotton"
+  const sorted = Object.keys(HS_LOOKUP).sort((a, b) => b.length - a.length);
+  for (const keyword of sorted) {
+    const re = new RegExp(`\\b${keyword.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i");
+    if (re.test(lower)) return HS_LOOKUP[keyword];
   }
   return null;
 }
 
 export function resolvePort(locationText: string): { code: string; country: string; name: string } | null {
   const lower = locationText.toLowerCase();
-  for (const [keyword, data] of Object.entries(PORT_LOOKUP)) {
-    if (lower.includes(keyword)) return data;
+  // Try multi-word keys first
+  const sorted = Object.keys(PORT_LOOKUP).sort((a, b) => b.length - a.length);
+  for (const keyword of sorted) {
+    const re = new RegExp(`\\b${keyword.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i");
+    if (re.test(lower)) return PORT_LOOKUP[keyword];
+  }
+  // Short aliases with strict word boundaries
+  for (const [alias, data] of Object.entries(SHORT_PORT_ALIASES)) {
+    const re = new RegExp(`\\b${alias}\\b`, "i");
+    if (re.test(lower)) return data;
   }
   return null;
 }
@@ -137,6 +152,7 @@ export const IntentOutput = z.object({
     .nullable(),
   quantity_unit: z.string().nullable(),
   origin_country: z.string().nullable(),
+  supplier: z.string().nullable(),
   destination_port: z.string().nullable(),
   destination_country: z.string().nullable(),
   deadline_date: z.string().nullable(),
@@ -160,6 +176,7 @@ Given a user's natural-language shipment request, extract:
 - quantity: numeric quantity (null if not specified)
 - quantity_unit: unit string like "yards", "kg", "units", "MT" (null if not specified)
 - origin_country: ISO 2-letter country code if specified (null if not)
+- supplier: specific supplier or factory name if the user names one (e.g. "Vinatex", "Acme Textiles Co."); null if no specific supplier is mentioned
 - destination_port: UNLOCODE port code (e.g. "USLAX", "USNYC", "USOAK") — infer from city/state/region
 - destination_country: ISO 2-letter country code for destination
 - deadline_date: ISO 8601 date (YYYY-MM-DD) if deadline mentioned, null otherwise
@@ -184,6 +201,12 @@ Port inference:
 - Houston → USHOU
 - Miami → USMIA
 - Savannah → USSAV
+
+Supplier extraction examples:
+- "from Vinatex in Vietnam" → supplier: "Vinatex"
+- "from Anhui Hengyi Textiles" → supplier: "Anhui Hengyi Textiles"
+- "cotton from Vietnam" → supplier: null (no specific supplier named)
+- "organic cotton, from Vietnam, into LA" → supplier: null
 
 Respond ONLY with valid JSON matching the schema above.`;
 }

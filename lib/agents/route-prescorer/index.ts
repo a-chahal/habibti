@@ -5,16 +5,17 @@ import { getMarineForecast } from "../../sources/openmeteo";
 import { searchRecentGDELT } from "../../sources/gdelt";
 import { cache } from "../../cache";
 
-// Lane lookup: origin_country → destination_port prefix → route info
+// Lane lookup: origin_country:destination_port → route info
 interface LaneDef {
   lane_name: string;
   typical_transit_days: number;
   chokepoints: string[];
-  bbox: BoundingBox; // bounding box for AIS vessel sampling
+  bbox: BoundingBox;
   waypoints: Array<{ lat: number; lon: number; name: string }>;
 }
 
 const LANES: Record<string, LaneDef> = {
+  // China
   "CN:USLAX": {
     lane_name: "Trans-Pacific (China → Los Angeles)",
     typical_transit_days: 14,
@@ -25,6 +26,51 @@ const LANES: Record<string, LaneDef> = {
       { lat: 33, lon: -118, name: "Los Angeles Approaches" },
     ],
   },
+  "CN:USLGB": {
+    lane_name: "Trans-Pacific (China → Long Beach)",
+    typical_transit_days: 14,
+    chokepoints: [],
+    bbox: { minLat: 20, minLon: 140, maxLat: 40, maxLon: 170 },
+    waypoints: [
+      { lat: 35, lon: 160, name: "North Pacific" },
+      { lat: 33.7, lon: -118.2, name: "Long Beach Approaches" },
+    ],
+  },
+  "CN:USNYC": {
+    lane_name: "Trans-Pacific + Panama Canal (China → New York)",
+    typical_transit_days: 20,
+    chokepoints: ["Panama Canal"],
+    bbox: { minLat: 8, minLon: -80.5, maxLat: 10, maxLon: -79.5 },
+    waypoints: [
+      { lat: 35, lon: 160, name: "North Pacific" },
+      { lat: 9, lon: -79.9, name: "Panama Canal" },
+      { lat: 40.7, lon: -74, name: "New York Harbor" },
+    ],
+  },
+  "CN:USHOU": {
+    lane_name: "Trans-Pacific + Panama Canal (China → Houston)",
+    typical_transit_days: 19,
+    chokepoints: ["Panama Canal"],
+    bbox: { minLat: 8, minLon: -80.5, maxLat: 10, maxLon: -79.5 },
+    waypoints: [
+      { lat: 35, lon: 160, name: "North Pacific" },
+      { lat: 9, lon: -79.9, name: "Panama Canal" },
+      { lat: 29.7, lon: -94.9, name: "Houston Ship Channel" },
+    ],
+  },
+  "CN:USSAV": {
+    lane_name: "Trans-Pacific + Panama Canal (China → Savannah)",
+    typical_transit_days: 21,
+    chokepoints: ["Panama Canal"],
+    bbox: { minLat: 8, minLon: -80.5, maxLat: 10, maxLon: -79.5 },
+    waypoints: [
+      { lat: 35, lon: 160, name: "North Pacific" },
+      { lat: 9, lon: -79.9, name: "Panama Canal" },
+      { lat: 32.1, lon: -81, name: "Savannah Approaches" },
+    ],
+  },
+
+  // Vietnam
   "VN:USLAX": {
     lane_name: "Trans-Pacific (Vietnam → Los Angeles)",
     typical_transit_days: 16,
@@ -35,6 +81,44 @@ const LANES: Record<string, LaneDef> = {
       { lat: 35, lon: 160, name: "North Pacific" },
     ],
   },
+  "VN:USNYC": {
+    lane_name: "Suez Route (Vietnam → New York)",
+    typical_transit_days: 28,
+    chokepoints: ["Malacca Strait", "Bab-el-Mandeb", "Suez Canal"],
+    bbox: { minLat: 12, minLon: 43, maxLat: 15, maxLon: 46 },
+    waypoints: [
+      { lat: 1.5, lon: 104, name: "Malacca Strait" },
+      { lat: 12.5, lon: 43.5, name: "Bab-el-Mandeb" },
+      { lat: 30, lon: 32.5, name: "Suez Canal" },
+      { lat: 40.7, lon: -74, name: "New York Harbor" },
+    ],
+  },
+  "VN:USHOU": {
+    lane_name: "Trans-Pacific + Panama Canal (Vietnam → Houston)",
+    typical_transit_days: 25,
+    chokepoints: ["Malacca Strait", "Panama Canal"],
+    bbox: { minLat: 8, minLon: -80.5, maxLat: 10, maxLon: -79.5 },
+    waypoints: [
+      { lat: 1.5, lon: 104, name: "Malacca Strait" },
+      { lat: 35, lon: 160, name: "North Pacific" },
+      { lat: 9, lon: -79.9, name: "Panama Canal" },
+      { lat: 29.7, lon: -94.9, name: "Houston Ship Channel" },
+    ],
+  },
+  "VN:USSAV": {
+    lane_name: "Trans-Pacific + Panama Canal (Vietnam → Savannah)",
+    typical_transit_days: 26,
+    chokepoints: ["Malacca Strait", "Panama Canal"],
+    bbox: { minLat: 8, minLon: -80.5, maxLat: 10, maxLon: -79.5 },
+    waypoints: [
+      { lat: 1.5, lon: 104, name: "Malacca Strait" },
+      { lat: 35, lon: 160, name: "North Pacific" },
+      { lat: 9, lon: -79.9, name: "Panama Canal" },
+      { lat: 32.1, lon: -81, name: "Savannah Approaches" },
+    ],
+  },
+
+  // India
   "IN:USLAX": {
     lane_name: "Suez Route (India → Los Angeles)",
     typical_transit_days: 28,
@@ -45,6 +129,30 @@ const LANES: Record<string, LaneDef> = {
       { lat: 30, lon: 32.5, name: "Suez Canal" },
     ],
   },
+  "IN:USNYC": {
+    lane_name: "Suez Route (India → New York)",
+    typical_transit_days: 24,
+    chokepoints: ["Bab-el-Mandeb", "Suez Canal"],
+    bbox: { minLat: 12, minLon: 43, maxLat: 15, maxLon: 46 },
+    waypoints: [
+      { lat: 12.5, lon: 43.5, name: "Bab-el-Mandeb" },
+      { lat: 30, lon: 32.5, name: "Suez Canal" },
+      { lat: 40.7, lon: -74, name: "New York Harbor" },
+    ],
+  },
+  "IN:USHOU": {
+    lane_name: "Suez Route (India → Houston)",
+    typical_transit_days: 26,
+    chokepoints: ["Bab-el-Mandeb", "Suez Canal"],
+    bbox: { minLat: 12, minLon: 43, maxLat: 15, maxLon: 46 },
+    waypoints: [
+      { lat: 12.5, lon: 43.5, name: "Bab-el-Mandeb" },
+      { lat: 30, lon: 32.5, name: "Suez Canal" },
+      { lat: 29.7, lon: -94.9, name: "Houston Ship Channel" },
+    ],
+  },
+
+  // Indonesia
   "ID:USLAX": {
     lane_name: "Trans-Pacific (Indonesia → Los Angeles)",
     typical_transit_days: 18,
@@ -55,6 +163,20 @@ const LANES: Record<string, LaneDef> = {
       { lat: 35, lon: 160, name: "North Pacific" },
     ],
   },
+  "ID:USNYC": {
+    lane_name: "Suez Route (Indonesia → New York)",
+    typical_transit_days: 26,
+    chokepoints: ["Malacca Strait", "Bab-el-Mandeb", "Suez Canal"],
+    bbox: { minLat: 12, minLon: 43, maxLat: 15, maxLon: 46 },
+    waypoints: [
+      { lat: 1.5, lon: 104, name: "Malacca Strait" },
+      { lat: 12.5, lon: 43.5, name: "Bab-el-Mandeb" },
+      { lat: 30, lon: 32.5, name: "Suez Canal" },
+      { lat: 40.7, lon: -74, name: "New York Harbor" },
+    ],
+  },
+
+  // Bangladesh
   "BD:USLAX": {
     lane_name: "Suez Route (Bangladesh → Los Angeles)",
     typical_transit_days: 30,
@@ -65,12 +187,134 @@ const LANES: Record<string, LaneDef> = {
       { lat: 12.5, lon: 43.5, name: "Bab-el-Mandeb" },
     ],
   },
+  "BD:USNYC": {
+    lane_name: "Suez Route (Bangladesh → New York)",
+    typical_transit_days: 28,
+    chokepoints: ["Malacca Strait", "Bab-el-Mandeb", "Suez Canal"],
+    bbox: { minLat: 12, minLon: 43, maxLat: 15, maxLon: 46 },
+    waypoints: [
+      { lat: 1.5, lon: 104, name: "Malacca Strait" },
+      { lat: 12.5, lon: 43.5, name: "Bab-el-Mandeb" },
+      { lat: 30, lon: 32.5, name: "Suez Canal" },
+      { lat: 40.7, lon: -74, name: "New York Harbor" },
+    ],
+  },
+
+  // Mexico
   "MX:USLAX": {
     lane_name: "Short Sea (Mexico → Los Angeles)",
     typical_transit_days: 3,
     chokepoints: [],
     bbox: { minLat: 20, minLon: -120, maxLat: 35, maxLon: -105 },
     waypoints: [{ lat: 23, lon: -109, name: "Baja California" }],
+  },
+  "MX:USHOU": {
+    lane_name: "Gulf (Mexico → Houston)",
+    typical_transit_days: 2,
+    chokepoints: [],
+    bbox: { minLat: 20, minLon: -98, maxLat: 30, maxLon: -87 },
+    waypoints: [{ lat: 25, lon: -93, name: "Gulf of Mexico" }],
+  },
+  "MX:USNYC": {
+    lane_name: "Atlantic Coast (Mexico → New York)",
+    typical_transit_days: 8,
+    chokepoints: [],
+    bbox: { minLat: 20, minLon: -90, maxLat: 35, maxLon: -75 },
+    waypoints: [
+      { lat: 25, lon: -85, name: "Florida Straits" },
+      { lat: 40.7, lon: -74, name: "New York Harbor" },
+    ],
+  },
+
+  // Turkey
+  "TR:USLAX": {
+    lane_name: "Suez Route (Turkey → Los Angeles)",
+    typical_transit_days: 22,
+    chokepoints: ["Suez Canal", "Bab-el-Mandeb"],
+    bbox: { minLat: 12, minLon: 43, maxLat: 15, maxLon: 46 },
+    waypoints: [
+      { lat: 30, lon: 32.5, name: "Suez Canal" },
+      { lat: 12.5, lon: 43.5, name: "Bab-el-Mandeb" },
+    ],
+  },
+  "TR:USNYC": {
+    lane_name: "Mediterranean + Atlantic (Turkey → New York)",
+    typical_transit_days: 14,
+    chokepoints: [],
+    bbox: { minLat: 36, minLon: -10, maxLat: 44, maxLon: 5 },
+    waypoints: [
+      { lat: 38, lon: -9, name: "Strait of Gibraltar" },
+      { lat: 40.7, lon: -74, name: "New York Harbor" },
+    ],
+  },
+
+  // Germany
+  "DE:USNYC": {
+    lane_name: "North Atlantic (Germany → New York)",
+    typical_transit_days: 14,
+    chokepoints: [],
+    bbox: { minLat: 40, minLon: -50, maxLat: 55, maxLon: -10 },
+    waypoints: [
+      { lat: 52, lon: -20, name: "North Atlantic" },
+      { lat: 40.7, lon: -74, name: "New York Harbor" },
+    ],
+  },
+  "DE:USLAX": {
+    lane_name: "North Atlantic + Panama Canal (Germany → Los Angeles)",
+    typical_transit_days: 28,
+    chokepoints: ["Panama Canal"],
+    bbox: { minLat: 8, minLon: -80.5, maxLat: 10, maxLon: -79.5 },
+    waypoints: [
+      { lat: 52, lon: -20, name: "North Atlantic" },
+      { lat: 9, lon: -79.9, name: "Panama Canal" },
+    ],
+  },
+
+  // South Korea
+  "KR:USLAX": {
+    lane_name: "Trans-Pacific (South Korea → Los Angeles)",
+    typical_transit_days: 14,
+    chokepoints: [],
+    bbox: { minLat: 25, minLon: 140, maxLat: 40, maxLon: 165 },
+    waypoints: [
+      { lat: 38, lon: 155, name: "North Pacific" },
+      { lat: 33, lon: -118, name: "Los Angeles Approaches" },
+    ],
+  },
+  "KR:USNYC": {
+    lane_name: "Trans-Pacific + Panama Canal (South Korea → New York)",
+    typical_transit_days: 22,
+    chokepoints: ["Panama Canal"],
+    bbox: { minLat: 8, minLon: -80.5, maxLat: 10, maxLon: -79.5 },
+    waypoints: [
+      { lat: 38, lon: 155, name: "North Pacific" },
+      { lat: 9, lon: -79.9, name: "Panama Canal" },
+      { lat: 40.7, lon: -74, name: "New York Harbor" },
+    ],
+  },
+
+  // Japan
+  "JP:USLAX": {
+    lane_name: "Trans-Pacific (Japan → Los Angeles)",
+    typical_transit_days: 13,
+    chokepoints: [],
+    bbox: { minLat: 25, minLon: 140, maxLat: 40, maxLon: 165 },
+    waypoints: [
+      { lat: 38, lon: 155, name: "North Pacific" },
+      { lat: 33, lon: -118, name: "Los Angeles Approaches" },
+    ],
+  },
+
+  // Sri Lanka
+  "LK:USLAX": {
+    lane_name: "Suez Route (Sri Lanka → Los Angeles)",
+    typical_transit_days: 22,
+    chokepoints: ["Suez Canal", "Bab-el-Mandeb"],
+    bbox: { minLat: 12, minLon: 43, maxLat: 15, maxLon: 46 },
+    waypoints: [
+      { lat: 12.5, lon: 43.5, name: "Bab-el-Mandeb" },
+      { lat: 30, lon: 32.5, name: "Suez Canal" },
+    ],
   },
 };
 
@@ -101,12 +345,13 @@ export const RoutePrescoreOutput = z.object({
   origin_country: z.string(),
   destination_port: z.string(),
   routes: z.array(RouteOption),
+  transit_buffer_days: z.number().nullable().optional(),
   citations: z.array(z.string()),
 });
 
 export type RoutePrescoreOutput = z.infer<typeof RoutePrescoreOutput>;
 
-async function countVesselsInBBox(bbox: BoundingBox, sampleMs = 8_000): Promise<number> {
+async function countVesselsInBBox(bbox: BoundingBox, sampleMs = 30_000): Promise<number> {
   const mmsis = new Set<number>();
   return new Promise<number>((resolve) => {
     let closed = false;
@@ -128,7 +373,6 @@ async function countVesselsInBBox(bbox: BoundingBox, sampleMs = 8_000): Promise<
           mmsis.add(report.mmsi);
         },
         () => {
-          // on error just resolve with what we have
           if (!closed) {
             closed = true;
             clearTimeout(timer);
@@ -155,33 +399,34 @@ export class RoutePrescorer extends Agent {
   readonly tier = "mercury" as const;
 
   async process(input: unknown): Promise<RoutePrescoreOutput> {
-    const { origin_country, destination_port, shipmentId } = input as {
+    const { origin_country, destination_port, deadline_date, shipmentId } = input as {
       origin_country: string;
       destination_port: string;
+      deadline_date?: string | null;
       shipmentId?: string;
     };
 
     const cacheKey = `route-prescore:${origin_country}:${destination_port}`;
     const cached = await cache.get<RoutePrescoreOutput>(cacheKey);
     if (cached) {
+      const transitBuffer = this.computeBuffer(cached, deadline_date);
       await this.publishSignal({
         shipmentId,
         signalType: "route_prescore",
-        severity: "info",
-        payload: cached as unknown as Record<string, unknown>,
+        severity: transitBuffer !== null && transitBuffer < 5 ? "high" : "info",
+        payload: { ...cached, transit_buffer_days: transitBuffer } as unknown as Record<string, unknown>,
         confidence: 0.75,
       });
-      return cached;
+      return { ...cached, transit_buffer_days: transitBuffer };
     }
 
     const laneKey = `${origin_country.toUpperCase()}:${destination_port.toUpperCase()}`;
-    // Find closest matching lane
     const lane =
       LANES[laneKey] ??
       Object.entries(LANES).find(([k]) => k.startsWith(origin_country.toUpperCase()))?.[1] ??
-      LANES["CN:USLAX"]; // fallback to trans-Pacific
+      LANES["CN:USLAX"];
 
-    // AIS vessel count in lane bbox
+    // AIS vessel count in lane bbox (30s sample)
     let vesselCount = 0;
     try {
       vesselCount = await countVesselsInBBox(lane.bbox);
@@ -189,26 +434,28 @@ export class RoutePrescorer extends Agent {
       // non-fatal
     }
 
-    // Marine weather for primary waypoint
-    let weatherSummary = "Data unavailable";
-    if (lane.waypoints.length > 0) {
+    // Marine weather for ALL waypoints
+    const weatherResults: Array<{ name: string; avgWave: number }> = [];
+    for (const wp of lane.waypoints) {
       try {
-        const wp = lane.waypoints[0];
         const forecast = await getMarineForecast(wp.lat, wp.lon, ["wave_height", "wind_wave_height"]);
-        const avgWave =
-          (forecast.hourly.wave_height ?? [])
-            .slice(0, 24)
-            .reduce((s, v) => s + v, 0) /
-            Math.max(1, (forecast.hourly.wave_height ?? []).slice(0, 24).length) || 0;
-        weatherSummary = avgWave < 1.5
-          ? `Calm (avg wave ${avgWave.toFixed(1)}m near ${wp.name})`
-          : avgWave < 3
-          ? `Moderate swell (avg ${avgWave.toFixed(1)}m near ${wp.name})`
-          : `Rough seas (avg ${avgWave.toFixed(1)}m near ${wp.name})`;
+        const waves = (forecast.hourly.wave_height ?? []).slice(0, 24);
+        const avgWave = waves.length > 0 ? waves.reduce((s, v) => s + v, 0) / waves.length : 0;
+        weatherResults.push({ name: wp.name, avgWave: +avgWave.toFixed(1) });
       } catch {
         // non-fatal
       }
     }
+
+    const maxAvgWave = weatherResults.length > 0 ? Math.max(...weatherResults.map(r => r.avgWave)) : 0;
+    const worstWaypoint = weatherResults.find(r => r.avgWave === maxAvgWave)?.name ?? "unknown";
+    const weatherSummary = weatherResults.length === 0
+      ? "Forecast unavailable"
+      : maxAvgWave < 1.5
+      ? `Calm conditions across ${weatherResults.length} waypoints (max avg wave ${maxAvgWave}m near ${worstWaypoint})`
+      : maxAvgWave < 3
+      ? `Moderate swell on ${weatherResults.length} waypoints (max avg ${maxAvgWave}m near ${worstWaypoint})`
+      : `Rough seas on ${weatherResults.length} waypoints (max avg ${maxAvgWave}m near ${worstWaypoint})`;
 
     // GDELT chokepoint events
     const chokepointContext: string[] = [];
@@ -219,10 +466,7 @@ export class RoutePrescorer extends Agent {
         const gdelt = await searchRecentGDELT(query, 14, 5);
         if (gdelt.articles.length > 0) {
           chokepointContext.push(
-            `${cp}: ${gdelt.articles
-              .slice(0, 3)
-              .map((a) => a.title)
-              .join(" | ")}`
+            `${cp}: ${gdelt.articles.slice(0, 3).map((a) => a.title).join(" | ")}`
           );
         } else {
           chokepointContext.push(`${cp}: no recent disruption events`);
@@ -231,6 +475,11 @@ export class RoutePrescorer extends Agent {
         chokepointContext.push(`${cp}: unable to fetch news`);
       }
     }
+
+    const transitBuffer = this.computeBuffer({ routes: [{ typical_transit_days: lane.typical_transit_days } as any] } as any, deadline_date);
+    const bufferNote = transitBuffer !== null
+      ? `\nDeadline transit buffer: ${transitBuffer} days (deadline - typical transit). ${transitBuffer < 5 ? "⚠ BUFFER TIGHT — flag in assessment." : ""}`
+      : "";
 
     const systemPrompt = `You are a maritime route analyst. Assess shipping route risk for cargo from ${origin_country} to ${destination_port}.
 
@@ -246,18 +495,21 @@ Return JSON:
     "weather_outlook": string,
     "chokepoint_risks": [{ "name": string, "current_events": string, "severity": "none"|"low"|"medium"|"high"|"critical" }]
   }],
+  "transit_buffer_days": number|null,
   "citations": string[]
-}`;
+}${bufferNote}`;
 
     const userMsg = `Lane: ${lane.lane_name}
 Transit: ${lane.typical_transit_days} days
 Chokepoints: ${lane.chokepoints.join(", ") || "none"}
-AIS vessels sampled in lane (8s window): ${vesselCount}
-Weather: ${weatherSummary}
+AIS vessels sampled in lane (30s window): ${vesselCount}
+Weather across ${weatherResults.length} waypoints: ${weatherSummary}
+Weather detail: ${weatherResults.map(r => `${r.name}=${r.avgWave}m avg`).join(", ") || "no data"}
 Chokepoint news:
 ${chokepointContext.join("\n") || "No chokepoints on this route"}
 
-Return route assessment. Current traffic density should be based on vessel count (0=unknown, 1-2=low, 3-9=medium, 10+=high).`;
+Set transit_buffer_days to ${transitBuffer !== null ? String(transitBuffer) : "null"}.
+Return route assessment. Current traffic density: 0=unknown, 1-2=low, 3-9=medium, 10+=high.`;
 
     const result = await this.callLLMValidated(
       [
@@ -267,16 +519,26 @@ Return route assessment. Current traffic density should be based on vessel count
       RoutePrescoreOutput
     );
 
-    await cache.set(cacheKey, result as unknown as object, 2 * 60 * 60); // 2h
+    const finalResult = { ...result, transit_buffer_days: transitBuffer };
+    await cache.set(cacheKey, finalResult as unknown as object, 2 * 60 * 60);
 
+    const severity = transitBuffer !== null && transitBuffer < 5 ? "high" : "info";
     await this.publishSignal({
       shipmentId,
       signalType: "route_prescore",
-      severity: "info",
-      payload: result as unknown as Record<string, unknown>,
+      severity: severity as "info" | "high",
+      payload: finalResult as unknown as Record<string, unknown>,
       confidence: 0.78,
     });
 
-    return result;
+    return finalResult;
+  }
+
+  private computeBuffer(output: RoutePrescoreOutput, deadlineDate?: string | null): number | null {
+    if (!deadlineDate) return null;
+    const transitDays = output.routes?.[0]?.typical_transit_days;
+    if (transitDays == null) return null;
+    const daysToDeadline = Math.round((new Date(deadlineDate).getTime() - Date.now()) / 86_400_000);
+    return daysToDeadline - transitDays;
   }
 }

@@ -26,32 +26,62 @@ const COUNTRY_CATALOG: Array<{ iso2: string; name: string; numeric: string }> = 
   { iso2: "BR", name: "Brazil", numeric: "76" },
   { iso2: "MG", name: "Madagascar", numeric: "450" },
   { iso2: "PE", name: "Peru", numeric: "604" },
+  { iso2: "EG", name: "Egypt", numeric: "818" },
+  { iso2: "MA", name: "Morocco", numeric: "504" },
 ];
 
-// Countries under comprehensive US sanctions — always filter out
 const SANCTIONED = new Set(["IR", "KP", "CU", "SY"]);
 
-// HS chapter prefix → most relevant candidate countries
+// Approximate transit days for viability pre-filter
+const TYPICAL_TRANSIT: Record<string, number> = {
+  MX: 4, CN: 14, VN: 16, TW: 14, KR: 14, JP: 14, TH: 18,
+  KH: 18, MY: 16, ID: 18, PH: 18, LK: 22, IN: 28, BD: 30,
+  PK: 30, TR: 20, EG: 22, MA: 20, DE: 25, BR: 30, ET: 35,
+  MG: 30, PE: 20,
+};
+
 function candidatesForHS(hsCode: string): typeof COUNTRY_CATALOG {
   const chapter = parseInt(hsCode.slice(0, 2), 10);
   if (chapter >= 50 && chapter <= 63) {
+    // Textiles and apparel
     return COUNTRY_CATALOG.filter((c) =>
-      ["CN", "VN", "IN", "BD", "ID", "TR", "PK", "KH", "MY", "LK", "ET", "MX"].includes(c.iso2)
+      ["CN", "VN", "IN", "BD", "ID", "TR", "PK", "KH", "MY", "LK", "ET", "MX", "EG", "MA"].includes(c.iso2)
     );
   }
   if (chapter >= 84 && chapter <= 85) {
+    // Electronics / machinery
     return COUNTRY_CATALOG.filter((c) =>
       ["CN", "VN", "TW", "KR", "JP", "MX", "TH", "IN", "MY", "DE"].includes(c.iso2)
     );
   }
   if (chapter >= 1 && chapter <= 24) {
+    // Food and agriculture
     return COUNTRY_CATALOG.filter((c) =>
-      ["BR", "IN", "TH", "VN", "ID", "MX", "TR", "BD", "PE", "MG"].includes(c.iso2)
+      ["BR", "IN", "TH", "VN", "ID", "MX", "TR", "BD", "PE", "MG", "EG"].includes(c.iso2)
     );
   }
   if (chapter >= 72 && chapter <= 83) {
+    // Metals
     return COUNTRY_CATALOG.filter((c) =>
       ["CN", "TR", "DE", "KR", "JP", "IN", "MX", "BR"].includes(c.iso2)
+    );
+  }
+  if (chapter === 64) {
+    // Footwear
+    return COUNTRY_CATALOG.filter((c) =>
+      ["CN", "VN", "IN", "ID", "BR", "MX", "KH", "BD"].includes(c.iso2)
+    );
+  }
+  if (chapter === 94) {
+    // Furniture
+    return COUNTRY_CATALOG.filter((c) =>
+      ["CN", "VN", "IN", "MX", "PL", "ID", "MY", "TH"].includes(c.iso2)
+    );
+  }
+  if (chapter >= 39 && chapter <= 40) {
+    // Plastics / rubber
+    return COUNTRY_CATALOG.filter((c) =>
+      ["CN", "IN", "TH", "MY", "ID", "DE", "KR", "JP", "MX"].includes(c.iso2)
     );
   }
   return COUNTRY_CATALOG.filter((c) =>
@@ -83,13 +113,17 @@ export class CountryDiscovererAgent extends Agent {
   readonly tier = "mercury" as const;
 
   async process(input: unknown): Promise<CountryDiscovererOutput> {
-    const { hs_code, destination_country, shipmentId } = input as {
+    const { hs_code, destination_country, preferred_origin, quantity, quantity_unit, deadline_date, shipmentId } = input as {
       hs_code: string;
       destination_country?: string;
+      preferred_origin?: string | null;
+      quantity?: number | null;
+      quantity_unit?: string | null;
+      deadline_date?: string | null;
       shipmentId?: string;
     };
 
-    const cacheKey = `country-discoverer:${hs_code}`;
+    const cacheKey = `country-discoverer:${hs_code}:${preferred_origin ?? "any"}:${deadline_date ?? "open"}`;
     const cached = await cache.get<CountryDiscovererOutput>(cacheKey);
     if (cached) {
       await this.publishSignal({
@@ -102,18 +136,42 @@ export class CountryDiscovererAgent extends Agent {
       return cached;
     }
 
-    const candidates = candidatesForHS(hs_code);
-    const year = String(new Date().getFullYear() - 1);
+    let candidates = candidatesForHS(hs_code);
 
-    // Query Comtrade for each candidate
+    // Ensure user-specified origin is always in the candidate pool
+    if (preferred_origin) {
+      const upper = preferred_origin.toUpperCase();
+      if (!candidates.some((c) => c.iso2 === upper)) {
+        const entry = COUNTRY_CATALOG.find((c) => c.iso2 === upper);
+        if (entry) candidates = [entry, ...candidates];
+      }
+    }
+
+    // Pre-filter: remove sanctioned + deadline-violating candidates
+    const daysToDeadline = deadline_date
+      ? Math.round((new Date(deadline_date).getTime() - Date.now()) / 86_400_000)
+      : null;
+
+    const viableCandidates = candidates.filter((c) => {
+      if (SANCTIONED.has(c.iso2)) return false;
+      // Keep preferred origin regardless of transit time (let option-ranker explain the constraint)
+      if (preferred_origin && c.iso2 === preferred_origin.toUpperCase()) return true;
+      if (daysToDeadline !== null) {
+        const transit = TYPICAL_TRANSIT[c.iso2] ?? 25;
+        if (transit + 5 > daysToDeadline) return false;
+      }
+      return true;
+    });
+
+    const year = String(new Date().getFullYear() - 1);
+    let comtradeSuccess = false;
+
     const volumeData: Array<{ iso2: string; name: string; exportVolume: number; usVolume: number }> = [];
 
-    for (const country of candidates) {
-      if (SANCTIONED.has(country.iso2)) continue;
+    for (const country of viableCandidates) {
       let exportVolume = 0;
       let usVolume = 0;
       try {
-        // Global exports from this country
         const global = await queryComtrade({
           reporterCode: country.numeric,
           cmdCode: hs_code,
@@ -123,7 +181,6 @@ export class CountryDiscovererAgent extends Agent {
         });
         exportVolume = global.data.reduce((s, r) => s + r.primaryValue, 0);
 
-        // Exports to US (partner=842)
         const toUS = await queryComtrade({
           reporterCode: country.numeric,
           cmdCode: hs_code,
@@ -132,13 +189,14 @@ export class CountryDiscovererAgent extends Agent {
           partnerCode: "842",
         });
         usVolume = toUS.data.reduce((s, r) => s + r.primaryValue, 0);
+        if (exportVolume > 0) comtradeSuccess = true;
       } catch {
-        // Comtrade may be unavailable; proceed with 0 — Sonnet fills in from training data
+        // Comtrade unavailable; LLM fills in from training data
       }
       volumeData.push({ iso2: country.iso2, name: country.name, exportVolume, usVolume });
     }
 
-    // Check sanctions for any country-level matches
+    // Check sanctions for country-level matches
     const sanctionsSummary: string[] = [];
     for (const c of volumeData) {
       try {
@@ -146,9 +204,7 @@ export class CountryDiscovererAgent extends Agent {
         if (matches.length > 0) {
           sanctionsSummary.push(`${c.name}: ${matches.length} sanctions entity matches`);
         }
-      } catch {
-        // non-fatal
-      }
+      } catch { /* non-fatal */ }
     }
 
     const dataJson = JSON.stringify(
@@ -157,10 +213,27 @@ export class CountryDiscovererAgent extends Agent {
         country_name: v.name,
         comtrade_export_usd: v.exportVolume,
         comtrade_us_export_usd: v.usVolume,
+        typical_transit_days: TYPICAL_TRANSIT[v.iso2] ?? 25,
       })),
       null,
       2
     );
+
+    const preferredNote = preferred_origin
+      ? `\nIMPORTANT: The buyer has specified "${preferred_origin}" as their preferred origin country. This country MUST appear as the FIRST candidate in your ranked list regardless of volume rank.`
+      : "";
+
+    const deadlineNote = daysToDeadline !== null
+      ? `\nDEADLINE: Buyer needs delivery in ${daysToDeadline} days. Candidates with typical transit > ${daysToDeadline - 5} days have already been pre-filtered. Note transit feasibility in your ranking.`
+      : "";
+
+    const quantityNote = quantity
+      ? `\nQUANTITY: ${quantity} ${quantity_unit ?? "units"}. Weight candidates by minimum order quantity feasibility.`
+      : "";
+
+    const dataNote = comtradeSuccess
+      ? ""
+      : "\nNOTE: Comtrade API was unavailable. Use your knowledge to estimate volumes. Confidence in volume data is low.";
 
     const systemPrompt = `You are a trade sourcing analyst. Rank candidate exporting countries for a US importer.
 
@@ -169,14 +242,14 @@ Given Comtrade export data (some may be 0 if API was unavailable — use your kn
 For each candidate:
 - country_code: ISO 2-letter
 - country_name: full name
-- annual_export_volume_usd: estimated annual global export volume in USD (use Comtrade data if nonzero, otherwise estimate from knowledge)
+- annual_export_volume_usd: estimated annual global export volume in USD
 - us_import_volume_usd: estimated annual US import volume from this country for this HS code
 - lane_established: true if regular container shipping lane to US exists
 - trend: "rising" | "stable" | "falling" based on recent 3-year direction
-- citations: array of source URLs or data references (use "UN Comtrade 2023" if from data, otherwise describe the source)
+- citations: array of source URLs (use "UN Comtrade ${year}" if from data, or "LLM estimate (Comtrade unavailable)" if synthesized)
 
 Sanctions summary (filter these out): ${sanctionsSummary.join("; ") || "none"}
-Destination country preference: ${destination_country ?? "US"}
+Destination country preference: ${destination_country ?? "US"}${preferredNote}${deadlineNote}${quantityNote}${dataNote}
 
 Respond ONLY with valid JSON: { "hs_code": "${hs_code}", "candidates": [...], "data_year": "${year}", "citations": [...] }`;
 
@@ -188,7 +261,6 @@ Respond ONLY with valid JSON: { "hs_code": "${hs_code}", "candidates": [...], "d
       CountryDiscovererOutput
     );
 
-    // Cache for 24h
     await cache.set(cacheKey, result as unknown as object, 24 * 60 * 60);
 
     await this.publishSignal({
@@ -196,7 +268,7 @@ Respond ONLY with valid JSON: { "hs_code": "${hs_code}", "candidates": [...], "d
       signalType: "country_candidates",
       severity: "info",
       payload: result as unknown as Record<string, unknown>,
-      confidence: 0.85,
+      confidence: comtradeSuccess ? 0.85 : 0.45,
     });
 
     return result;

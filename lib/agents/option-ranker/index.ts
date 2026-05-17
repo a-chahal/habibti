@@ -70,13 +70,19 @@ function buildContext(signals: Signal[], intent: Record<string, unknown>): strin
   const p = (s: Signal) => (s.payload ?? {}) as Record<string, unknown>;
   const lines: string[] = [];
 
+  const today = new Date();
+  const deadline = intent.deadline_date ? new Date(String(intent.deadline_date)) : null;
+
   lines.push("=== SHIPMENT INTENT ===");
   lines.push(`HS Code: ${intent.hs_code}`);
   lines.push(`Product: ${intent.product_description}`);
   lines.push(`Quantity: ${intent.quantity} ${intent.quantity_unit ?? ""}`);
   lines.push(`Budget: $${intent.budget_usd ?? "unspecified"}`);
+  lines.push(`Product value (est): $${intent.product_value_usd ?? "unspecified"} (budget / 1.25 heuristic)`);
   lines.push(`Deadline: ${intent.deadline_date ?? "unspecified"}`);
   lines.push(`Destination port: ${intent.destination_port ?? "USLAX"}`);
+  if (intent.supplier) lines.push(`Buyer-specified supplier: ${intent.supplier}`);
+  if (intent.origin_country) lines.push(`BUYER-SPECIFIED ORIGIN: ${intent.origin_country} — MUST be ranked #1 unless hard-disqualified by compliance`);
 
   lines.push("\n=== CANDIDATE COUNTRIES ===");
   for (const s of byAgent.get("country-discoverer") ?? []) {
@@ -146,11 +152,40 @@ function buildContext(signals: Signal[], intent: Record<string, unknown>): strin
     lines.push(
       `  ${q.origin_country}→${q.destination_port}: "${route.lane_name}", ${route.typical_transit_days}d, density=${route.current_traffic_density}, weather="${route.weather_outlook}"`
     );
+    if (q.transit_buffer_days !== undefined && q.transit_buffer_days !== null) {
+      lines.push(`    Transit buffer: ${q.transit_buffer_days} days${(q.transit_buffer_days as number) < 5 ? " ⚠ TIGHT" : ""}`);
+    }
     for (const cp of route.chokepoint_risks ?? []) {
       if (cp.severity !== "none") {
         lines.push(`    ⚠ ${cp.name} [${cp.severity}]: ${(cp.current_events ?? "").slice(0, 100)}`);
       }
     }
+  }
+
+  // Pre-compute derived delivery estimates so LLM does not need to do date math
+  lines.push("\n=== DERIVED DELIVERY ESTIMATES (use these, do not recalculate) ===");
+  for (const s of byAgent.get("route-prescorer") ?? []) {
+    const q = p(s);
+    const routes = (q.routes as any[]) ?? [];
+    const route = routes[0];
+    if (!route) continue;
+    const transitDays = route.typical_transit_days as number;
+    const eta = new Date(today.getTime() + transitDays * 86400000);
+    const bufferDays = deadline ? Math.round((deadline.getTime() - eta.getTime()) / 86400000) : null;
+    lines.push(
+      `  ${q.origin_country}: transit=${transitDays}d, estimated_arrival=${eta.toISOString().slice(0, 10)}` +
+      (bufferDays !== null ? `, deadline_buffer=${bufferDays}d${bufferDays < 0 ? " ⚠ MISSES DEADLINE" : ""}` : "")
+    );
+  }
+
+  // Include signal confidence so LLM can discount low-confidence sources
+  lines.push("\n=== SIGNAL CONFIDENCE NOTES ===");
+  const lowConfidenceSignals = signals.filter(s => {
+    const conf = (s as any).confidence;
+    return conf !== undefined && conf !== null && Number(conf) < 0.5;
+  });
+  for (const s of lowConfidenceSignals) {
+    lines.push(`  ${s.agent_name} (${s.signal_type}): confidence=${Number((s as any).confidence).toFixed(2)} — low confidence, treat as indicative only`);
   }
 
   return lines.join("\n");
@@ -180,6 +215,7 @@ FILTERING RULES (apply before ranking):
 - Discard any country where compliance-screener verdict = "flagged" AND uflpa_flag = true. Hard disqualification.
 - Prefer countries where compliance verdict = "clean."
 - The 3 options must be from 3 different country_codes.
+- If the intent includes a BUYER-SPECIFIED ORIGIN, that country_code MUST be rank 1 unless it is hard-disqualified. No exceptions.
 
 OUTPUT JSON schema (return exactly this, no markdown):
 {
@@ -223,7 +259,7 @@ OUTPUT JSON schema (return exactly this, no markdown):
 
 export class OptionRankerAgent extends Agent {
   readonly name = "option-ranker";
-  readonly tier = "mercury" as const;
+  readonly tier = "opus" as const;
 
   async process(input: unknown): Promise<OptionRankerOutput> {
     const { shipmentId, intent_data } = input as {
@@ -240,7 +276,7 @@ export class OptionRankerAgent extends Agent {
     const intent = intent_data ?? {};
     const context = buildContext(sourcingSignals as Signal[], intent);
 
-    const result = await this.callLLMValidated(
+    const rawResult = await this.callLLMValidated(
       [
         { role: "system", content: SYSTEM_PROMPT },
         {
@@ -252,15 +288,30 @@ export class OptionRankerAgent extends Agent {
       { maxTokens: 4000 }
     );
 
+    // Hard-enforce: preferred origin must be rank 1 in code (LLM may slip)
+    const preferredCountry = (intent.origin_country as string | undefined)?.toUpperCase();
+    let options = rawResult.options;
+    if (preferredCountry) {
+      const idx = options.findIndex(o => o.country_code.toUpperCase() === preferredCountry);
+      if (idx > 0) {
+        const [preferred] = options.splice(idx, 1);
+        options = [preferred, ...options];
+        options.forEach((o, i) => { (o as any).rank = i + 1; });
+        console.log(`[option-ranker] hard-enforced ${preferredCountry} to rank 1 (LLM had it at rank ${idx + 1})`);
+      }
+    }
+    const result = { ...rawResult, options };
+
     // Write each option to the options table
     const today = new Date();
     for (const opt of result.options) {
-      // Upsert supplier record if we have a named match
+      // Upsert supplier record only for real supplier names (not synthetic placeholders)
+      const isSyntheticSupplier = !opt.supplier_name || /\bsupplier\b/i.test(opt.supplier_name);
       let supplierId: string | null = null;
-      if (opt.supplier_name) {
+      if (!isSyntheticSupplier) {
         try {
           const supplier = await upsertSupplier({
-            name: opt.supplier_name,
+            name: opt.supplier_name!,
             country: opt.country_code,
             registry_source: "option-ranker",
             verification_status: "unverified",

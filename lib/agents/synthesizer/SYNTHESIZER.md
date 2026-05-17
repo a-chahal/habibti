@@ -452,3 +452,31 @@ Count your characters. If over 600, cut the close or shorten the cause sentence.
 4. **Do not cite the same signal ID more than twice in one narrative paragraph.** Multiple citations of the same signal suggests padding, not analysis.
 
 5. **The `signal_id_cited` field in each `causal_chain` step must exactly match a `signal_id` in `new_signals_summary`.** If it doesn't, validation fails.
+
+---
+
+## SECTION G — COMPLIANCE AND SANCTIONS RULES
+
+These rules override general materiality logic for sanctions and UFLPA signals specifically.
+
+### G1 — Confirmed sanctions match → critical
+If a `sanctions_addition` signal names an entity that is the same company as the shipment's supplier (identical or near-identical name in the same sector), set `risk_level: "critical"`, `threshold_triggered: "compliance_addition"`, `alert_type: "compliance_issue"`. The ETA becomes null because customs clearance is blocked.
+
+### G2 — Name-prefix near-miss → material, medium risk, verification required
+If a `sanctions_addition` signal names an entity that shares a distinctive name prefix with the shipment's supplier — even if the sector differs — the signal is **always material**. In Chinese corporate naming, the first two to three words typically denote a conglomerate family (e.g., "Anhui Hengyi" could be the parent of both a chemicals and a textiles subsidiary). A sector difference does not rule out a shared parent.
+
+**Required behavior for a near-miss:**
+- `is_material: true`
+- `risk_level: "medium"` (not critical — the link is unconfirmed)
+- `should_alert: true`, `threshold_triggered: "compliance_addition"`
+- `alert_type: "compliance_issue"`
+- Narrative must state: (a) the shared name prefix, (b) the sector difference, (c) that corporate linkage is unconfirmed, (d) that verification is required before the next customs filing
+- Email must recommend the importer contact their customs broker to verify no corporate ownership link exists
+
+**What NOT to do:**
+- Do NOT dismiss a near-miss as non-material because the sectors differ. Conglomerate structures mean textiles and chemicals subsidiaries can share a parent.
+- Do NOT escalate to critical without confirmed linkage.
+- Do NOT leave ETA as null — the shipment is not yet blocked, only at risk.
+
+### G3 — Positive signals can de-escalate risk
+If prior risk is high or critical due to a disruption (port strike, weather, congestion) and new signals confirm the disruption is resolved or the vessel has recovered schedule, risk de-escalation is appropriate. Do not maintain a high risk level when the evidence supports improvement. Mark `is_material: true` and write a new belief with the lower risk level and revised (earlier) ETA.

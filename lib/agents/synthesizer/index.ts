@@ -6,6 +6,7 @@ import {
   getLatestBelief,
   createBelief,
   createAlert,
+  listAlerts,
 } from "../../db/queries";
 import { emit } from "../../events/emitter";
 import { cache } from "../../cache";
@@ -46,6 +47,11 @@ export interface SynthesizerInput {
   newSignals: SignalRow[];
   priorBelief: BeliefRow | null;
   shipmentContext: ShipmentContext;
+  recentAlerts?: Array<{ alert_type: string; headline: string; created_at: Date }>;
+  latestVesselPosition?: {
+    lat: number; lon: number; speed_knots?: number;
+    on_schedule: boolean; schedule_deviation?: number;
+  } | null;
   /** Cache key for pre-loaded demo output, e.g. "demo:suez:eta_shift" */
   demoKey?: string;
   /** Skip DB writes and event emits — for test harness use */
@@ -362,7 +368,33 @@ The email body is exactly five sentences in this order. Total under 600 characte
 2. The signal_id must match exactly. No abbreviations. No invented IDs.
 3. If a claim cannot be directly cited, frame it as inference: "This is consistent with prior Suez disruptions, though we have one source so far."
 4. The signal_id_cited in each causal_chain step must exactly match a signal_id in new_signals_summary.
-5. Validation fails if narrative cites an ID not present in supporting_signal_ids.`;
+5. Validation fails if narrative cites an ID not present in supporting_signal_ids.
+
+---
+
+## SECTION G — COMPLIANCE AND SANCTIONS RULES
+
+### G1 — Confirmed sanctions match → critical
+If a sanctions_addition signal names the same company as the shipment's supplier (identical or near-identical name, same sector), set risk_level "critical", threshold_triggered "compliance_addition", alert_type "compliance_issue". ETA becomes null — clearance is blocked.
+
+### G2 — Name-prefix near-miss → always material, medium risk
+If a sanctions_addition signal names an entity sharing a distinctive 2–3-word prefix with the shipment's supplier — even if the sector differs — the signal is ALWAYS MATERIAL. In Chinese corporate naming the first words identify the conglomerate family. "Anhui Hengyi Chemical" and "Anhui Hengyi Textiles" may share a parent despite being different businesses.
+
+Required for a near-miss:
+- is_material: true
+- risk_level: "medium" (unconfirmed link — not critical)
+- should_alert: true, threshold_triggered: "compliance_addition"
+- alert_type: "compliance_issue"
+- Narrative: state the shared prefix, the sector difference, that corporate linkage is unconfirmed, and that verification is required before next customs filing
+- Email: recommend the importer contact their customs broker to verify no ownership link exists
+
+DO NOT dismiss a near-miss as non-material because sectors differ. DO NOT escalate to critical without confirmed linkage.
+
+### G3 — Positive signals can de-escalate risk
+If new signals confirm a prior disruption is resolved or the vessel recovered schedule, risk de-escalation is appropriate. Set is_material: true, write a new belief with lower risk and revised (earlier) ETA. Do not preserve a high risk level when evidence supports improvement.
+
+### G4 — No duplicate alerts within 6 hours
+Do NOT set should_alert: true if an alert of the same alert_type was already issued within the past 6 hours AND the ETA has not shifted by more than 24 hours since that alert. You will be given a list of recent alerts to check. A second Suez alert is redundant unless the ETA changed materially. When in doubt, update the belief narrative without triggering a new alert.`;
 }
 
 function buildUserPrompt(input: SynthesizerInput): string {
@@ -381,6 +413,8 @@ function buildUserPrompt(input: SynthesizerInput): string {
     if (intent.product_description) lines.push(`Product: ${intent.product_description}`);
     if (intent.quantity) lines.push(`Quantity: ${intent.quantity} ${intent.quantity_unit ?? ""}`);
     if (intent.budget_usd) lines.push(`Budget: $${intent.budget_usd}`);
+    if (intent.supplier) lines.push(`Supplier: ${intent.supplier}`);
+    if (intent.route_notes) lines.push(`Route: ${intent.route_notes}`);
   }
 
   lines.push("\n=== PRIOR BELIEF ===");
@@ -410,6 +444,22 @@ function buildUserPrompt(input: SynthesizerInput): string {
     }
   }
 
+  // Pass recent alerts so LLM can apply Rule G4
+  if (input.recentAlerts && input.recentAlerts.length > 0) {
+    lines.push("\n=== RECENT ALERTS (last 5, for Rule G4 dedup check) ===");
+    for (const a of input.recentAlerts) {
+      lines.push(`  [${a.alert_type}] ${a.headline} — issued ${a.created_at.toISOString()}`);
+    }
+  }
+
+  // Include latest vessel position for spatial grounding
+  if (input.latestVesselPosition) {
+    const vp = input.latestVesselPosition;
+    lines.push(`\n=== LATEST VESSEL POSITION ===`);
+    lines.push(`  Position: ${vp.lat}°, ${vp.lon}°, speed=${vp.speed_knots ?? "?"}kt, on_schedule=${vp.on_schedule}`);
+    if (!vp.on_schedule) lines.push(`  ⚠ Vessel is OFF SCHEDULE (deviation: ${vp.schedule_deviation ?? "?"})`);
+  }
+
   lines.push("\n=== TASK ===");
   lines.push("Work through Steps 1–7 of the output schema in order. Return valid JSON only.");
   lines.push("CRITICAL RULES:");
@@ -418,6 +468,7 @@ function buildUserPrompt(input: SynthesizerInput): string {
   lines.push("- alert MUST be null when should_alert is false");
   lines.push("- Every claim in narrative MUST include [signal_id] citation using exact IDs from new_signals_summary");
   lines.push("- signal_id_cited in each causal_chain step MUST exactly match an ID from new_signals_summary");
+  lines.push("- Rule G4: Do NOT alert if same alert_type was issued in the past 6h unless ETA shifted >24h");
 
   return lines.join("\n");
 }
@@ -464,7 +515,7 @@ export class SynthesizerAgent extends Agent {
   private debounceTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private lastSynthesisAt = new Map<string, Date>();
 
-  /** Wire up SIGNAL_NEW subscription with 3-second debounce per shipment */
+  /** Wire up SIGNAL_NEW subscription with 30-second trailing debounce per shipment */
   startListening() {
     this.subscribe(["SIGNAL_NEW"], (payload) => {
       const { shipmentId } = payload;
@@ -478,7 +529,7 @@ export class SynthesizerAgent extends Agent {
         this.synthesizeForShipment(shipmentId).catch((err) =>
           console.error(`[synthesizer] error synthesizing ${shipmentId}:`, err)
         );
-      }, 3000);
+      }, 30000); // 30s trailing debounce — waits for burst to settle
 
       this.debounceTimers.set(shipmentId, timer);
     });
@@ -487,20 +538,32 @@ export class SynthesizerAgent extends Agent {
   }
 
   private async synthesizeForShipment(shipmentId: string) {
-    const [shipment, allSignals, priorBelief] = await Promise.all([
+    const [shipment, allSignals, priorBelief, recentAlertsRaw] = await Promise.all([
       getShipment(shipmentId),
       getSignalsForShipment(shipmentId),
       getLatestBelief(shipmentId),
+      listAlerts(shipmentId),
     ]);
 
     if (!shipment) return;
 
     // Only process signals recorded after the last belief
     const cutoff = priorBelief?.created_at ?? new Date(0);
-    const newSignals = allSignals.filter((s) => {
-      const recordedAt = (s as unknown as { recorded_at: Date }).recorded_at ?? s.occurred_at;
-      return recordedAt > cutoff;
-    });
+    const SEVERITY_RANK: Record<string, number> = { critical: 4, high: 3, medium: 2, low: 1, info: 0 };
+    const allNewSignals = allSignals
+      .filter((s) => {
+        const recordedAt = (s as unknown as { recorded_at: Date }).recorded_at ?? s.occurred_at;
+        return recordedAt > cutoff;
+      })
+      .sort((a, b) => {
+        // Severity-prioritized retention: critical/high signals never evicted by routine pings
+        const sevDiff = (SEVERITY_RANK[b.severity] ?? 0) - (SEVERITY_RANK[a.severity] ?? 0);
+        if (sevDiff !== 0) return sevDiff;
+        const aAt = ((a as unknown as { recorded_at: Date }).recorded_at ?? a.occurred_at).getTime();
+        const bAt = ((b as unknown as { recorded_at: Date }).recorded_at ?? b.occurred_at).getTime();
+        return bAt - aAt;
+      });
+    const newSignals = allNewSignals.slice(0, 5);
 
     if (newSignals.length === 0) return;
 
@@ -517,11 +580,24 @@ export class SynthesizerAgent extends Agent {
       intent: shipment.intent,
     };
 
+    // Extract latest vessel position from new signals
+    const latestVesselSig = newSignals.find(s => s.signal_type === "vessel_position");
+    const latestVesselPosition = latestVesselSig
+      ? (latestVesselSig.payload as any)
+      : null;
+
+    // Recent alerts for Rule G4
+    const recentAlerts = recentAlertsRaw
+      .slice(0, 5)
+      .map(a => ({ alert_type: a.alert_type, headline: a.headline, created_at: a.created_at }));
+
     await this.process({
       shipmentId,
       newSignals: newSignals as unknown as SignalRow[],
       priorBelief: priorBelief as unknown as BeliefRow | null,
       shipmentContext,
+      recentAlerts,
+      latestVesselPosition,
     });
   }
 
@@ -549,7 +625,7 @@ export class SynthesizerAgent extends Agent {
     ];
 
     // Call LLM with error-feedback retry
-    const output = await this.callLLMWithErrorFeedback(messages, { maxTokens: 3000 });
+    const output = await this.callLLMWithErrorFeedback(messages, { maxTokens: 4000 });
     if (!output) {
       console.error(`[synthesizer] synthesis failed for ${shipmentId} — skipping`);
       return null;
@@ -567,14 +643,14 @@ export class SynthesizerAgent extends Agent {
           content: `Your output failed citation validation: ${citationError}. Fix the signal_id references so they exactly match the IDs from new_signals_summary. Re-emit valid JSON.`,
         },
       ];
-      const fixedRaw = await this.callLLM(fixMessages, { json: true, maxTokens: 3000 });
+      const fixedRaw = await this.callLLM(fixMessages, { json: true, maxTokens: 4000 });
       let fixed: SynthesizerOutput | null = null;
       try {
         fixed = SynthesizerOutput.parse(JSON.parse(fixedRaw));
         const fixedCitationError = validateCitations(fixed);
         if (fixedCitationError) {
-          console.error(`[synthesizer] citation still invalid after retry: ${fixedCitationError}`);
-          // Use unfixed output anyway — citation issue is not worth losing the synthesis
+          console.error(`[synthesizer] citation still invalid after retry: ${fixedCitationError} — dropping synthesis`);
+          return null; // Hard-fail: citation errors mean the output cannot be trusted
         } else {
           return await this.persistAndEmit(fixed, input);
         }
@@ -627,45 +703,70 @@ export class SynthesizerAgent extends Agent {
     if (skipDbWrites) return output;
     if (!output.materiality_assessment.is_material || !output.new_belief) return output;
 
+    // Rule G4 code-level enforcement: suppress duplicate alerts within 6h unless ETA shifted >24h
+    let mutableOutput = output;
+    if (mutableOutput.alert_decision.should_alert && mutableOutput.alert && input.recentAlerts?.length) {
+      const sixHoursAgo = new Date(Date.now() - 6 * 3600 * 1000);
+      const recentSameType = input.recentAlerts.filter(
+        (a) => a.alert_type === mutableOutput.alert?.alert_type && a.created_at > sixHoursAgo
+      );
+      if (recentSameType.length > 0) {
+        const priorEta = priorBelief?.current_eta;
+        const newEtaStr = mutableOutput.new_belief?.current_eta;
+        const newEta = newEtaStr ? new Date(newEtaStr) : null;
+        const etaShiftHours = priorEta && newEta
+          ? Math.abs(newEta.getTime() - priorEta.getTime()) / 3600000
+          : 0;
+        if (etaShiftHours < 24) {
+          console.log(`[synthesizer] Rule G4: suppressing ${mutableOutput.alert.alert_type} alert for ${shipmentId} — same type within 6h, ETA shift ${etaShiftHours.toFixed(1)}h < 24h`);
+          mutableOutput = {
+            ...mutableOutput,
+            alert_decision: { ...mutableOutput.alert_decision, should_alert: false, threshold_triggered: "none" },
+            alert: null,
+          };
+        }
+      }
+    }
+
     const nextVersion = (priorBelief?.version ?? 0) + 1;
-    const etaDate = output.new_belief.current_eta
-      ? new Date(output.new_belief.current_eta)
+    const etaDate = mutableOutput.new_belief!.current_eta
+      ? new Date(mutableOutput.new_belief!.current_eta)
       : null;
 
     const belief = await createBelief({
       shipment_id: shipmentId,
       version: nextVersion,
       current_eta: etaDate,
-      risk_level: output.new_belief.risk_level,
-      narrative: output.new_belief.narrative,
-      supporting_signal_ids: output.new_belief.supporting_signal_ids,
+      risk_level: mutableOutput.new_belief!.risk_level,
+      narrative: mutableOutput.new_belief!.narrative,
+      supporting_signal_ids: mutableOutput.new_belief!.supporting_signal_ids,
     });
 
     emit("BELIEF_UPDATED", {
       beliefId: belief.id,
       shipmentId,
-      riskLevel: output.new_belief.risk_level,
+      riskLevel: mutableOutput.new_belief!.risk_level,
       version: nextVersion,
     });
 
-    if (output.alert_decision.should_alert && output.alert) {
+    if (mutableOutput.alert_decision.should_alert && mutableOutput.alert) {
       const alertRecord = await createAlert({
         shipment_id: shipmentId,
         belief_id: belief.id,
-        alert_type: output.alert.alert_type,
-        headline: output.alert.headline,
-        full_narrative: output.new_belief.narrative,
-        draft_email: JSON.stringify(output.alert.draft_email),
+        alert_type: mutableOutput.alert.alert_type,
+        headline: mutableOutput.alert.headline,
+        full_narrative: mutableOutput.new_belief!.narrative,
+        draft_email: JSON.stringify(mutableOutput.alert.draft_email),
       });
 
       emit("ALERT_CREATED", {
         alertId: alertRecord.id,
         shipmentId,
-        alertType: output.alert.alert_type,
-        headline: output.alert.headline,
+        alertType: mutableOutput.alert.alert_type,
+        headline: mutableOutput.alert.headline,
       });
     }
 
-    return output;
+    return mutableOutput;
   }
 }

@@ -1,0 +1,352 @@
+[
+  {
+    "timestamp_offset_seconds": 0,
+    "lat": 10.72,
+    "lon": 106.82,
+    "speed_knots": 16.5,
+    "heading": 32
+  },
+  {
+    "timestamp_offset_seconds": 28000,
+    "lat": 11.076,
+    "lon": 107.756,
+    "speed_knots": 16.5,
+    "heading": 33
+  },
+  {
+    "timestamp_offset_seconds": 56000,
+    "lat": 11.432,
+    "lon": 108.692,
+    "speed_knots": 16.5,
+    "heading": 34
+  },
+  {
+    "timestamp_offset_seconds": 84000,
+    "lat": 11.788,
+    "lon": 109.628,
+    "speed_knots": 16.5,
+    "heading": 36
+  },
+  {
+    "timestamp_offset_seconds": 112000,
+    "lat": 12.144,
+    "lon": 110.564,
+    "speed_knots": 16.5,
+    "heading": 37
+  },
+  {
+    "timestamp_offset_seconds": 140000,
+    "lat": 12.5,
+    "lon": 111.5,
+    "speed_knots": 16.5,
+    "heading": 38
+  },
+  {
+    "timestamp_offset_seconds": 168000,
+    "lat": 13.7,
+    "lon": 113.1,
+    "speed_knots": 16.6,
+    "heading": 41
+  },
+  {
+    "timestamp_offset_seconds": 196000,
+    "lat": 14.9,
+    "lon": 114.7,
+    "speed_knots": 16.7,
+    "heading": 44
+  },
+  {
+    "timestamp_offset_seconds": 224000,
+    "lat": 16.1,
+    "lon": 116.3,
+    "speed_knots": 16.8,
+    "heading": 46
+  },
+  {
+    "timestamp_offset_seconds": 252000,
+    "lat": 17.3,
+    "lon": 117.9,
+    "speed_knots": 16.9,
+    "heading": 49
+  },
+  {
+    "timestamp_offset_seconds": 280000,
+    "lat": 18.5,
+    "lon": 119.5,
+    "speed_knots": 17,
+    "heading": 52
+  },
+  {
+    "timestamp_offset_seconds": 308000,
+    "lat": 19.6,
+    "lon": 121.1,
+    "speed_knots": 17,
+    "heading": 54
+  },
+  {
+    "timestamp_offset_seconds": 336000,
+    "lat": 20.7,
+    "lon": 122.7,
+    "speed_knots": 17.1,
+    "heading": 56
+  },
+  {
+    "timestamp_offset_seconds": 364000,
+    "lat": 21.8,
+    "lon": 124.3,
+    "speed_knots": 17.1,
+    "heading": 58
+  },
+  {
+    "timestamp_offset_seconds": 392000,
+    "lat": 22.9,
+    "lon": 125.9,
+    "speed_knots": 17.2,
+    "heading": 60
+  },
+  {
+    "timestamp_offset_seconds": 420000,
+    "lat": 24,
+    "lon": 127.5,
+    "speed_knots": 17.2,
+    "heading": 62
+  },
+  {
+    "timestamp_offset_seconds": 448000,
+    "lat": 25.6,
+    "lon": 130.4,
+    "speed_knots": 17.3,
+    "heading": 65
+  },
+  {
+    "timestamp_offset_seconds": 476000,
+    "lat": 27.2,
+    "lon": 133.3,
+    "speed_knots": 17.3,
+    "heading": 68
+  },
+  {
+    "timestamp_offset_seconds": 504000,
+    "lat": 28.8,
+    "lon": 136.2,
+    "speed_knots": 17.4,
+    "heading": 70
+  },
+  {
+    "timestamp_offset_seconds": 532000,
+    "lat": 30.4,
+    "lon": 139.1,
+    "speed_knots": 17.4,
+    "heading": 73
+  },
+  {
+    "timestamp_offset_seconds": 560000,
+    "lat": 32,
+    "lon": 142,
+    "speed_knots": 17.5,
+    "heading": 76
+  },
+  {
+    "timestamp_offset_seconds": 588000,
+    "lat": 33.6,
+    "lon": 145.6,
+    "speed_knots": 17.5,
+    "heading": 78
+  },
+  {
+    "timestamp_offset_seconds": 616000,
+    "lat": 35.2,
+    "lon": 149.2,
+    "speed_knots": 17.5,
+    "heading": 79
+  },
+  {
+    "timestamp_offset_seconds": 644000,
+    "lat": 36.8,
+    "lon": 152.8,
+    "speed_knots": 17.5,
+    "heading": 81
+  },
+  {
+    "timestamp_offset_seconds": 672000,
+    "lat": 38.4,
+    "lon": 156.4,
+    "speed_knots": 17.5,
+    "heading": 82
+  },
+  {
+    "timestamp_offset_seconds": 700000,
+    "lat": 40,
+    "lon": 160,
+    "speed_knots": 17.5,
+    "heading": 84
+  },
+  {
+    "timestamp_offset_seconds": 728000,
+    "lat": 40.5,
+    "lon": 163.4,
+    "speed_knots": 17.5,
+    "heading": 85
+  },
+  {
+    "timestamp_offset_seconds": 756000,
+    "lat": 41,
+    "lon": 166.8,
+    "speed_knots": 17.4,
+    "heading": 85
+  },
+  {
+    "timestamp_offset_seconds": 784000,
+    "lat": 41.5,
+    "lon": 170.2,
+    "speed_knots": 17.4,
+    "heading": 86
+  },
+  {
+    "timestamp_offset_seconds": 812000,
+    "lat": 42,
+    "lon": 173.6,
+    "speed_knots": 17.3,
+    "heading": 86
+  },
+  {
+    "timestamp_offset_seconds": 840000,
+    "lat": 42.5,
+    "lon": 177,
+    "speed_knots": 17.3,
+    "heading": 87
+  },
+  {
+    "timestamp_offset_seconds": 868000,
+    "lat": 42.4,
+    "lon": 107.6,
+    "speed_knots": 17.3,
+    "heading": 88
+  },
+  {
+    "timestamp_offset_seconds": 896000,
+    "lat": 42.3,
+    "lon": 38.2,
+    "speed_knots": 17.3,
+    "heading": 88
+  },
+  {
+    "timestamp_offset_seconds": 924000,
+    "lat": 42.2,
+    "lon": -31.2,
+    "speed_knots": 17.3,
+    "heading": 89
+  },
+  {
+    "timestamp_offset_seconds": 952000,
+    "lat": 42.1,
+    "lon": -100.6,
+    "speed_knots": 17.3,
+    "heading": 89
+  },
+  {
+    "timestamp_offset_seconds": 980000,
+    "lat": 42,
+    "lon": -170,
+    "speed_knots": 17.3,
+    "heading": 90
+  },
+  {
+    "timestamp_offset_seconds": 1008000,
+    "lat": 41.6,
+    "lon": -166.6,
+    "speed_knots": 17.2,
+    "heading": 91
+  },
+  {
+    "timestamp_offset_seconds": 1036000,
+    "lat": 41.2,
+    "lon": -163.2,
+    "speed_knots": 17.2,
+    "heading": 92
+  },
+  {
+    "timestamp_offset_seconds": 1064000,
+    "lat": 40.8,
+    "lon": -159.8,
+    "speed_knots": 17.1,
+    "heading": 94
+  },
+  {
+    "timestamp_offset_seconds": 1092000,
+    "lat": 40.4,
+    "lon": -156.4,
+    "speed_knots": 17.1,
+    "heading": 95
+  },
+  {
+    "timestamp_offset_seconds": 1120000,
+    "lat": 40,
+    "lon": -153,
+    "speed_knots": 17,
+    "heading": 96
+  },
+  {
+    "timestamp_offset_seconds": 1148000,
+    "lat": 39.2,
+    "lon": -148.8,
+    "speed_knots": 17,
+    "heading": 98
+  },
+  {
+    "timestamp_offset_seconds": 1176000,
+    "lat": 38.4,
+    "lon": -144.6,
+    "speed_knots": 16.9,
+    "heading": 100
+  },
+  {
+    "timestamp_offset_seconds": 1204000,
+    "lat": 37.6,
+    "lon": -140.4,
+    "speed_knots": 16.9,
+    "heading": 101
+  },
+  {
+    "timestamp_offset_seconds": 1232000,
+    "lat": 36.8,
+    "lon": -136.2,
+    "speed_knots": 16.8,
+    "heading": 103
+  },
+  {
+    "timestamp_offset_seconds": 1260000,
+    "lat": 36,
+    "lon": -132,
+    "speed_knots": 16.8,
+    "heading": 105
+  },
+  {
+    "timestamp_offset_seconds": 1288000,
+    "lat": 35.43,
+    "lon": -128.567,
+    "speed_knots": 16.6,
+    "heading": 107
+  },
+  {
+    "timestamp_offset_seconds": 1316000,
+    "lat": 34.86,
+    "lon": -125.135,
+    "speed_knots": 16.4,
+    "heading": 109
+  },
+  {
+    "timestamp_offset_seconds": 1344000,
+    "lat": 34.29,
+    "lon": -121.703,
+    "speed_knots": 16.2,
+    "heading": 110
+  },
+  {
+    "timestamp_offset_seconds": 1372000,
+    "lat": 33.72,
+    "lon": -118.27,
+    "speed_knots": 16,
+    "heading": 112
+  }
+]

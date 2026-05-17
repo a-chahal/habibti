@@ -3,6 +3,9 @@ import { Agent } from "../base";
 import { searchCompanies } from "../../sources/companies-house";
 import { searchLEI } from "../../sources/gleif";
 
+// Legal-entity suffixes to strip before similarity scoring
+const LEGAL_SUFFIXES = /\b(co\.?|ltd\.?|llc\.?|corp\.?|inc\.?|pvt\.?|gmbh|s\.a\.?|b\.v\.?|limited|company|corporation|trading|textile|textiles|group|international|enterprises?|industries|manufacturing|factory|factories)\b\.?/gi;
+
 const MatchCandidate = z.object({
   name: z.string(),
   registry_id: z.string(),
@@ -25,14 +28,18 @@ export const SupplierVerifierOutput = z.object({
 
 export type SupplierVerifierOutput = z.infer<typeof SupplierVerifierOutput>;
 
+function stripSuffixes(s: string): string {
+  return s.replace(LEGAL_SUFFIXES, "").replace(/\s+/g, " ").trim();
+}
+
 function nameSimilarity(a: string, b: string): number {
-  const normalize = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, " ").trim();
+  const normalize = (s: string) => stripSuffixes(s).toLowerCase().replace(/[^a-z0-9]/g, " ").trim();
   const na = normalize(a);
   const nb = normalize(b);
   if (na === nb) return 1;
-  const wordsA = new Set(na.split(/\s+/));
-  const wordsB = new Set(nb.split(/\s+/));
-  const intersection = [...wordsA].filter((w) => wordsB.has(w) && w.length > 2).length;
+  const wordsA = new Set(na.split(/\s+/).filter((w) => w.length > 2));
+  const wordsB = new Set(nb.split(/\s+/).filter((w) => w.length > 2));
+  const intersection = [...wordsA].filter((w) => wordsB.has(w)).length;
   const union = new Set([...wordsA, ...wordsB]).size;
   return union > 0 ? intersection / union : 0;
 }
@@ -43,10 +50,30 @@ export class SupplierVerifierAgent extends Agent {
 
   async process(input: unknown): Promise<SupplierVerifierOutput> {
     const { supplier_name, country, shipmentId } = input as {
-      supplier_name: string;
+      supplier_name?: string | null;
       country: string;
       shipmentId?: string;
     };
+
+    // If no supplier name was provided, skip the registry lookup entirely
+    if (!supplier_name) {
+      const skipped: SupplierVerifierOutput = {
+        supplier_name: "",
+        country,
+        registry_source: "skipped",
+        match_candidates: [],
+        limited_data: true,
+        citations: ["No supplier name specified — registry verification skipped"],
+      };
+      await this.publishSignal({
+        shipmentId,
+        signalType: "supplier_verification_skipped",
+        severity: "info",
+        payload: { country, reason: "no_supplier_name" },
+        confidence: 1.0,
+      });
+      return skipped;
+    }
 
     const isUK = ["GB", "UK"].includes(country.toUpperCase());
     let candidates: z.infer<typeof MatchCandidate>[] = [];
@@ -81,7 +108,8 @@ export class SupplierVerifierAgent extends Agent {
           incorporation_date: r.registrationDate ?? null,
           status: r.status,
           officers: [],
-          parent_company: null,
+          // GLEIF returns ultimate parent relationship — use it if available
+          parent_company: (r as any).ultimateParent?.legalName ?? null,
           match_confidence: nameSimilarity(supplier_name, r.legalName),
         }));
       } catch {
@@ -92,7 +120,7 @@ export class SupplierVerifierAgent extends Agent {
     // Sort by confidence descending
     candidates.sort((a, b) => b.match_confidence - a.match_confidence);
 
-    // If we have hits, use Sonnet to enhance with context
+    // If we have hits, use Mercury to enhance with context
     if (candidates.length > 0) {
       const systemPrompt = `You are a supplier verification analyst. Given registry data for a searched supplier, return enhanced match candidates.
 
@@ -106,7 +134,7 @@ Return JSON:
   "citations": string[]
 }
 
-Adjust match_confidence based on: name similarity (primary), country match, active status, registration age (older = more established). Inactive/dissolved companies get confidence penalty 0.3.`;
+Adjust match_confidence based on: name similarity (primary), country match, active status, registration age. Inactive/dissolved companies get confidence penalty 0.3. Where registry data includes a parent company or controlling entity, preserve it in "parent_company".`;
 
       try {
         const enhanced = await this.callLLMValidated(
@@ -134,7 +162,6 @@ Adjust match_confidence based on: name similarity (primary), country match, acti
       }
     }
 
-    // No registry matches or API failure
     const result: SupplierVerifierOutput = {
       supplier_name,
       country,

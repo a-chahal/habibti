@@ -23,26 +23,39 @@ export const CountryRiskOutput = z.object({
 
 export type CountryRiskOutput = z.infer<typeof CountryRiskOutput>;
 
-// Country code → full name for GDELT query
 const COUNTRY_NAMES: Record<string, string> = {
   CN: "China", VN: "Vietnam", IN: "India", ID: "Indonesia", BD: "Bangladesh",
   TR: "Turkey", PK: "Pakistan", MX: "Mexico", TH: "Thailand", KH: "Cambodia",
   MY: "Malaysia", LK: "Sri Lanka", ET: "Ethiopia", TW: "Taiwan", KR: "South Korea",
   JP: "Japan", DE: "Germany", BR: "Brazil", PE: "Peru", MG: "Madagascar",
+  EG: "Egypt", MA: "Morocco", US: "United States", GB: "United Kingdom",
 };
+
+// HS chapter → industry-specific GDELT terms to append
+function industryTerms(hsCode: string | null | undefined): string {
+  const chapter = parseInt((hsCode ?? "").slice(0, 2), 10);
+  if (chapter >= 50 && chapter <= 63) return "factory OR mill OR garment OR labor OR textile";
+  if (chapter >= 84 && chapter <= 85) return "fab OR chip OR semiconductor OR electronics OR factory";
+  if (chapter >= 1 && chapter <= 24) return "harvest OR drought OR crop OR agriculture OR food";
+  if (chapter >= 72 && chapter <= 83) return "steel OR metal OR smelter OR mining";
+  if (chapter >= 27 && chapter <= 40) return "chemical OR refinery OR plant OR manufacturing";
+  return "manufacturing OR production OR export";
+}
 
 export class CountryRiskAgent extends Agent {
   readonly name = "country-risk";
   readonly tier = "mercury" as const;
 
   async process(input: unknown): Promise<CountryRiskOutput> {
-    const { country_code, lookback_days = 30, shipmentId } = input as {
+    const { country_code, hs_code, deadline_date, lookback_days = 30, shipmentId } = input as {
       country_code: string;
+      hs_code?: string | null;
+      deadline_date?: string | null;
       lookback_days?: number;
       shipmentId?: string;
     };
 
-    const cacheKey = `country-risk:${country_code}:${lookback_days}`;
+    const cacheKey = `country-risk:${country_code}:${(hs_code ?? "").slice(0, 2)}:${lookback_days}`;
     const cached = await cache.get<CountryRiskOutput>(cacheKey);
     if (cached) {
       await this.publishSignal({
@@ -56,27 +69,30 @@ export class CountryRiskAgent extends Agent {
     }
 
     const countryName = COUNTRY_NAMES[country_code.toUpperCase()] ?? country_code;
+    const extraTerms = industryTerms(hs_code);
 
-    // Query GDELT for trade-relevant events
     let articles: Awaited<ReturnType<typeof searchRecentGDELT>>["articles"] = [];
+    let gdeltSuccess = false;
     try {
       const gdelt = await searchRecentGDELT(
-        `"${countryName}" (port OR shipping OR trade OR strike OR tariff OR sanctions OR protest OR unrest OR military)`,
+        `"${countryName}" (port OR shipping OR trade OR strike OR tariff OR sanctions OR protest OR unrest OR military OR ${extraTerms})`,
         lookback_days,
         30
       );
       articles = gdelt.articles;
+      gdeltSuccess = true;
     } catch {
       // GDELT may be rate-limited; proceed with empty articles
     }
 
     const articleContext = articles
       .slice(0, 20)
-      .map(
-        (a) =>
-          `- [${a.seendate}] (${a.sourcelang}) ${a.title} — ${a.url}`
-      )
+      .map((a) => `- [${a.seendate}] (${a.sourcelang}) ${a.title} — ${a.url}`)
       .join("\n");
+
+    const deadlineNote = deadline_date
+      ? `\nDEADLINE NOTE: The buyer's shipment deadline is ${deadline_date}. Weight events by whether they are likely to impact shipping before this deadline.`
+      : "";
 
     const systemPrompt = `You are a geopolitical risk analyst specializing in trade-route risk for US importers.
 
@@ -88,6 +104,7 @@ Focus ONLY on events that affect shipping, imports, manufacturing, or labor for 
 - Trade policy changes (tariffs, sanctions, bans)
 - Major natural disasters affecting production/shipping
 - Labor unrest at factories or ports
+- Industry-specific issues: ${extraTerms}${deadlineNote}
 
 IGNORE: celebrity news, domestic political debates not affecting trade, sports, routine elections in stable democracies.
 
@@ -126,22 +143,23 @@ Return at minimum 2 top_events. If no articles were provided or none are relevan
       CountryRiskOutput
     );
 
-    await cache.set(cacheKey, result as unknown as object, 3 * 60 * 60); // 3h cache
+    await cache.set(cacheKey, result as unknown as object, 3 * 60 * 60);
+
+    // Lower confidence when GDELT failed — LLM is fabricating from training data
+    const confidence = gdeltSuccess ? (articles.length > 0 ? 0.85 : 0.65) : 0.3;
 
     await this.publishSignal({
       shipmentId,
       signalType: "country_risk",
       severity: this.stabilityToSeverity(result.stability),
       payload: result as unknown as Record<string, unknown>,
-      confidence: articles.length > 0 ? 0.85 : 0.65,
+      confidence,
     });
 
     return result;
   }
 
-  private stabilityToSeverity(
-    stability: string
-  ): "info" | "low" | "medium" | "high" | "critical" {
+  private stabilityToSeverity(stability: string): "info" | "low" | "medium" | "high" | "critical" {
     switch (stability) {
       case "stable": return "info";
       case "watch": return "low";
