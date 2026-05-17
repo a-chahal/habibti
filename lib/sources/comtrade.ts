@@ -23,21 +23,29 @@ export interface ComtradeResponse {
   count: number;
 }
 
-function httpsGetJson(url: string, timeoutMs = 30_000): Promise<string> {
+function httpsGetJson(url: string, timeoutMs = 8_000): Promise<string> {
   return new Promise((resolve, reject) => {
+    let settled = false;
+    const done = (fn: () => void) => { if (!settled) { settled = true; fn(); } };
+
+    const hardTimer = setTimeout(() => {
+      req.destroy();
+      done(() => reject(new Error("Comtrade request timed out")));
+    }, timeoutMs);
+
     const req = httpsGet(url, { headers: { Accept: "application/json" } }, (res) => {
       if (!res.statusCode || res.statusCode >= 400) {
+        clearTimeout(hardTimer);
         let body = "";
         res.on("data", (c) => (body += c));
-        res.on("end", () => reject(new Error(`Comtrade error ${res.statusCode}: ${body}`)));
+        res.on("end", () => done(() => reject(new Error(`Comtrade error ${res.statusCode}: ${body}`))));
         return;
       }
       let data = "";
       res.on("data", (c) => (data += c));
-      res.on("end", () => resolve(data));
+      res.on("end", () => { clearTimeout(hardTimer); done(() => resolve(data)); });
     });
-    req.on("error", reject);
-    req.setTimeout(timeoutMs, () => req.destroy(new Error("Comtrade request timed out")));
+    req.on("error", (err) => { clearTimeout(hardTimer); done(() => reject(err)); });
   });
 }
 

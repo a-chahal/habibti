@@ -17,7 +17,7 @@ export interface LEIRecord {
 export async function getLEI(lei: string): Promise<LEIRecord | null> {
   const res = await fetch(`${BASE}/lei-records/${lei}`, {
     headers: { Accept: "application/vnd.api+json" },
-    signal: AbortSignal.timeout(30000),
+    signal: AbortSignal.timeout(8000),
   });
   if (res.status === 404) return null;
   if (!res.ok) throw new Error(`GLEIF error ${res.status}: ${await res.text()}`);
@@ -51,7 +51,7 @@ export async function searchLEI(
 
   const res = await fetch(url.toString(), {
     headers: { Accept: "application/vnd.api+json" },
-    signal: AbortSignal.timeout(30000),
+    signal: AbortSignal.timeout(8000),
   });
   if (!res.ok) throw new Error(`GLEIF error ${res.status}: ${await res.text()}`);
 

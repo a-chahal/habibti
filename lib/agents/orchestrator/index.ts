@@ -253,8 +253,13 @@ class Orchestrator {
       status: "running",
     });
 
+    const t0 = Date.now();
+    console.log(`[Dispatch] → ${agentName} started`);
+
     try {
       const result = await handler(payload);
+      const ms = Date.now() - t0;
+      console.log(`[Dispatch] ✓ ${agentName} completed in ${ms}ms`);
       await updateDispatch(dispatch.id, { status: "completed", completed_at: new Date() });
 
       if (agentName === "intent-parser") {
@@ -265,8 +270,9 @@ class Orchestrator {
 
       return result;
     } catch (err: any) {
+      const ms = Date.now() - t0;
+      console.error(`[Dispatch] ✗ ${agentName} failed in ${ms}ms: ${err.message}`);
       await updateDispatch(dispatch.id, { status: "failed", completed_at: new Date() });
-      console.error(`[Orchestrator] dispatch ${agentName} failed for shipment ${shipmentId}:`, err.message);
       throw err;
     }
   }
@@ -274,11 +280,19 @@ class Orchestrator {
   private async dispatchCapped(
     agentName: string,
     shipmentId: string,
-    payload: Record<string, unknown>
+    payload: Record<string, unknown>,
+    timeoutMs = 20_000
   ): Promise<unknown> {
     await this.semaphore.acquire();
+    const start = Date.now();
     try {
-      return await this.dispatch(agentName, shipmentId, payload);
+      const timeout = new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error(`Agent ${agentName} timed out after ${timeoutMs}ms`)), timeoutMs)
+      );
+      return await Promise.race([this.dispatch(agentName, shipmentId, payload), timeout]);
+    } catch (err: any) {
+      console.warn(`[Orchestrator] dispatchCapped ${agentName} failed in ${Date.now() - start}ms: ${err.message}`);
+      throw err;
     } finally {
       this.semaphore.release();
     }

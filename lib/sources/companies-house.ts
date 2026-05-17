@@ -36,6 +36,7 @@ export async function searchCompanies(
 
   const res = await fetch(url.toString(), {
     headers: { Authorization: authHeader() },
+    signal: AbortSignal.timeout(8000),
   });
   if (!res.ok) throw new Error(`Companies House error ${res.status}: ${await res.text()}`);
 
@@ -53,6 +54,7 @@ export async function searchCompanies(
 export async function getCompany(companyNumber: string): Promise<CompanyDetail> {
   const res = await fetch(`${BASE}/company/${companyNumber}`, {
     headers: { Authorization: authHeader() },
+    signal: AbortSignal.timeout(8000),
   });
   if (!res.ok) throw new Error(`Companies House error ${res.status}: ${await res.text()}`);
 

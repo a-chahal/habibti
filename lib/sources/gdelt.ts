@@ -16,30 +16,44 @@ export interface GDELTResponse {
   totalResults: number;
 }
 
-function httpsGetJson(url: string, timeoutMs = 30_000): Promise<string> {
+function httpsGetJson(url: string, timeoutMs = 8_000): Promise<string> {
   return new Promise((resolve, reject) => {
+    let settled = false;
+    const done = (fn: () => void) => { if (!settled) { settled = true; fn(); } };
+
+    // Hard wall-clock timeout — kills the request regardless of socket activity
+    const hardTimer = setTimeout(() => {
+      req.destroy();
+      done(() => reject(new Error("GDELT request timed out")));
+    }, timeoutMs);
+
     const req = httpsGet(
       url,
       { headers: { "User-Agent": "Mozilla/5.0 (compatible; trade-platform/1.0)" } },
       (res) => {
         if (res.statusCode === 429) {
-          reject(new Error(`GDELT rate limited (429)`));
+          clearTimeout(hardTimer);
           res.resume();
+          done(() => reject(new Error("GDELT rate limited (429)")));
           return;
         }
         if (res.statusCode !== 200) {
-          reject(new Error(`GDELT error ${res.statusCode}`));
+          clearTimeout(hardTimer);
           res.resume();
+          done(() => reject(new Error(`GDELT error ${res.statusCode}`)));
           return;
         }
         let data = "";
         res.on("data", (chunk) => (data += chunk));
-        res.on("end", () => resolve(data));
+        res.on("end", () => {
+          clearTimeout(hardTimer);
+          done(() => resolve(data));
+        });
       }
     );
-    req.on("error", reject);
-    req.setTimeout(timeoutMs, () => {
-      req.destroy(new Error("GDELT request timed out"));
+    req.on("error", (err) => {
+      clearTimeout(hardTimer);
+      done(() => reject(err));
     });
   });
 }
@@ -64,8 +78,8 @@ export async function searchGDELT(params: {
     raw = await httpsGetJson(url.toString());
   } catch (err: any) {
     if (err.message?.includes("429")) {
-      // Rate limited — wait 6s and retry once
-      await new Promise((r) => setTimeout(r, 6000));
+      // Rate limited — short wait then one retry; if that also fails, throw so caller can proceed without GDELT
+      await new Promise((r) => setTimeout(r, 2000));
       raw = await httpsGetJson(url.toString());
     } else {
       throw err;

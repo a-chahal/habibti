@@ -259,7 +259,7 @@ OUTPUT JSON schema (return exactly this, no markdown):
 
 export class OptionRankerAgent extends Agent {
   readonly name = "option-ranker";
-  readonly tier = "opus" as const;
+  readonly tier = "mercury" as const;
 
   async process(input: unknown): Promise<OptionRankerOutput> {
     const { shipmentId, intent_data } = input as {

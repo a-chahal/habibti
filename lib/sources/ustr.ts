@@ -51,7 +51,7 @@ export async function fetchFederalRegisterUSTR(
   url.searchParams.append("fields[]", "abstract");
   url.searchParams.append("fields[]", "agencies");
 
-  const res = await fetch(url.toString());
+  const res = await fetch(url.toString(), { signal: AbortSignal.timeout(8000) });
   if (!res.ok) throw new Error(`Federal Register error ${res.status}: ${await res.text()}`);
 
   const json = await res.json();
