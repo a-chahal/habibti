@@ -3,7 +3,6 @@ import { useState, useEffect, useRef } from "react";
 import { useRouter } from "next/navigation";
 import { AnimatePresence, motion } from "framer-motion";
 import { Sparkles, HelpCircle, Check, Compass, ShieldAlert, ArrowRight, RotateCw, BookOpen, User } from "lucide-react";
-import { BackgroundGradientAnimation } from "@/components/ui/background-gradient-animation";
 
 const QUICK_INTENTS = [
   {
@@ -43,8 +42,9 @@ const HELP_TOOLTIPS = {
 
 export default function HomePage() {
   const router = useRouter();
-  const [step, setStep] = useState<1 | 2>(1);
+  // const [step, setStep] = useState<1 | 2>(1);
   const [intent, setIntent] = useState("");
+  /*
   const [selectedDirectives, setSelectedDirectives] = useState<string[]>([]);
   const [profileAnswers, setProfileAnswers] = useState<ProfileAnswers>({
     cadence: "",
@@ -52,6 +52,7 @@ export default function HomePage() {
     deadline: "",
     experience: "",
   });
+  */
   const [submitting, setSubmitting] = useState(false);
   const [exiting, setExiting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -63,13 +64,12 @@ export default function HomePage() {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   useEffect(() => {
-    if (step === 1) {
-      textareaRef.current?.focus();
-    }
-  }, [step]);
+    textareaRef.current?.focus();
+  }, []);
 
   const [shiningPillIndex, setShiningPillIndex] = useState<number>(0);
 
+  /*
   useEffect(() => {
     const handleGlobalKeyDown = (e: KeyboardEvent) => {
       if (step === 2 && e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
@@ -80,6 +80,7 @@ export default function HomePage() {
     window.addEventListener("keydown", handleGlobalKeyDown);
     return () => window.removeEventListener("keydown", handleGlobalKeyDown);
   }, [step, intent, selectedDirectives, profileAnswers]);
+  */
 
   useEffect(() => {
     // Select one random quick intent pill to be the target hint for this session
@@ -89,16 +90,16 @@ export default function HomePage() {
   const isPromptMeaningful = (text: string): boolean => {
     const trimmed = text.trim();
     if (trimmed.length < 10) return false;
-    
+
     // Core trade keywords
     const keywords = [
-      "cotton", "fabric", "textile", "battery", "batteries", "lithium", "cinnamon", "spice", 
-      "coffee", "beans", "solar", "panel", "wood", "steel", "clothing", "shirt", "apparel", 
-      "electronic", "toy", "goods", "product", "item", "cargo", "freight", "import", "export", 
+      "cotton", "fabric", "textile", "battery", "batteries", "lithium", "cinnamon", "spice",
+      "coffee", "beans", "solar", "panel", "wood", "steel", "clothing", "shirt", "apparel",
+      "electronic", "toy", "goods", "product", "item", "cargo", "freight", "import", "export",
       "source", "buy", "order", "purchase", "ship", "delivery", "transport", "logistic", "transit",
       "from", "into", "to", "by", "budget", "dollars", "$", "kg", "tons", "yards", "units", "pieces", "pcs"
     ];
-    
+
     const lower = trimmed.toLowerCase();
     return keywords.some(k => lower.includes(k));
   };
@@ -109,6 +110,7 @@ export default function HomePage() {
     return trimmed.split(/\s+/).length;
   };
 
+  /*
   const getIdentifiedProduct = () => {
     const lower = intent.toLowerCase();
     if (lower.includes("cotton") || lower.includes("fabric") || lower.includes("textile")) return "cotton";
@@ -158,6 +160,7 @@ export default function HomePage() {
       prev.includes(pillText) ? prev.filter((d) => d !== pillText) : [...prev, pillText]
     );
   };
+  */
 
   const handleRefinePrompt = () => {
     if (!intent.trim() || isRefining) return;
@@ -243,11 +246,11 @@ export default function HomePage() {
 
     setTimeout(() => {
       setRefineStatus("Formatting trade compliance schema...");
-      
+
       let refined = `I need to import ${quantity || "a bulk shipment"} of ${product}`;
       if (origin) refined += `, sourced from premium suppliers in ${origin}`;
       if (destination) refined += `, delivered safely into ${destination}`;
-      
+
       const dateMatch = intent.match(/(?:by|deadline|before)\s+([a-zA-Z]+\s+\d+|\d{4}-\d{2}-\d{2})/i);
       if (dateMatch?.[1]) {
         refined += `, with a target deadline of ${dateMatch[1]}`;
@@ -258,7 +261,7 @@ export default function HomePage() {
       if (budget) {
         refined += `, working within a total landing budget of ${budget}`;
       }
-      
+
       if (extra.length > 0) {
         refined += `.\n[System Directives]: Run end-to-end OFAC/sanctions check. ${extra.join(". ")}. Compare shipping routes to bypass high-congestion bottlenecks.`;
       } else {
@@ -296,9 +299,9 @@ export default function HomePage() {
       if (!res.ok) throw new Error("Reset failed");
       setResetDone(true);
       setIntent("");
-      setSelectedDirectives([]);
-      setProfileAnswers({ cadence: "", use: "", deadline: "", experience: "" });
-      setStep(1);
+      // setSelectedDirectives([]);
+      // setProfileAnswers({ cadence: "", use: "", deadline: "", experience: "" });
+      // setStep(1);
       setTimeout(() => setResetDone(false), 2000);
     } catch (err: any) {
       setError(err.message);
@@ -307,6 +310,7 @@ export default function HomePage() {
     }
   };
 
+  /*
   const handleNextStep = (intentText?: string) => {
     const text = (intentText ?? intent).trim();
     if (!text) return;
@@ -339,6 +343,7 @@ export default function HomePage() {
     }
     return full;
   };
+  */
 
   const handleSubmit = async (isSkip = false) => {
     const finalIntent = intent.trim();
@@ -350,7 +355,7 @@ export default function HomePage() {
       const res = await fetch("/api/shipments", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ intent: buildFullIntent(isSkip) }),
+        body: JSON.stringify({ intent: finalIntent }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error ?? "Failed to create shipment");
@@ -362,6 +367,7 @@ export default function HomePage() {
     }
   };
 
+  /*
   const setPill = (key: keyof ProfileAnswers, value: string) => {
     setProfileAnswers((prev) => ({
       ...prev,
@@ -405,6 +411,7 @@ export default function HomePage() {
       </div>
     </div>
   );
+  */
 
   return (
     <AnimatePresence mode="wait">
@@ -415,39 +422,27 @@ export default function HomePage() {
           animate={{ opacity: 1 }}
           exit={{ opacity: 0 }}
           transition={{ duration: 0.4 }}
-          className="min-h-screen w-screen bg-black text-white relative overflow-hidden"
+          className="h-screen w-screen text-white relative overflow-hidden font-mono"
         >
-          <BackgroundGradientAnimation
-            gradientBackgroundStart="rgb(8, 7, 16)"
-            gradientBackgroundEnd="rgb(3, 2, 8)"
-            firstColor="54, 47, 120"
-            secondColor="20, 80, 140"
-            thirdColor="8, 14, 44"
-            fourthColor="40, 18, 70"
-            fifthColor="12, 10, 30"
-            pointerColor="99, 102, 241"
-            brightness={1.0}
-            containerClassName="absolute inset-0 w-full h-full"
-            className="w-full h-full flex flex-col items-center justify-center px-6 overflow-y-auto relative z-10"
-          >
-            <div className="w-full max-w-2xl mt-[8vh] mb-12 relative z-20">
-            {/* Wordmark Header */}
-            <motion.div
-              initial={{ opacity: 0, y: -8 }}
-              animate={{ opacity: 1, y: 0 }}
-              transition={{ delay: 0.1, duration: 0.5 }}
-              className="mb-8 text-center"
-            >
-              <span className="text-xs tracking-[0.45em] text-white/60 uppercase font-mono font-semibold">
-                habibti
-              </span>
-              <h1 className="text-sm tracking-[0.1em] text-indigo-400/90 font-mono mt-2 uppercase font-bold">
-                Agent-Native Supply Swarm
-              </h1>
-            </motion.div>
+          <div className="w-full h-full flex flex-col items-center justify-center px-6 overflow-y-auto relative z-10">
+            <div className="w-full max-w-2xl relative z-20 pointer-events-auto">
+              {/* Wordmark Header */}
+              <motion.div
+                initial={{ opacity: 0, y: -8 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{ delay: 0.1, duration: 0.5 }}
+                className="mb-8 text-center"
+              >
+                <span className="text-xs tracking-[0.45em] text-white/60 uppercase font-mono font-semibold">
+                  habibti
+                </span>
+                <h1 className="text-sm tracking-[0.1em] text-white font-mono mt-2 uppercase font-bold">
+                  Agent-Native Supply Swarm
+                </h1>
+              </motion.div>
 
-            <AnimatePresence mode="wait">
-              {step === 1 ? (
+              <AnimatePresence mode="wait">
+                {/* {step === 1 ? ( */}
                 <motion.div
                   key="step1"
                   initial={{ opacity: 0, x: -15 }}
@@ -469,13 +464,13 @@ export default function HomePage() {
                         value={intent}
                         onChange={(e) => setIntent(e.target.value)}
                         placeholder="What are you trying to bring into this world?"
-                        rows={6}
+                        rows={4}
                         disabled={submitting || isRefining}
-                        className="w-full bg-white/[0.04] border border-white/20 rounded-2xl px-5 py-4 text-white placeholder-white/50 text-xl resize-none focus:outline-none focus:border-indigo-400 focus:bg-white/[0.06] transition-all leading-relaxed font-sans shadow-inner backdrop-blur-md"
+                        className="w-full bg-white/[0.04] border border-white rounded-2xl px-5 py-4 text-white/80 placeholder-white/35 text-xs font-medium resize-none focus:outline-none focus:border-white focus:bg-white/[0.06] transition-all leading-relaxed font-mono shadow-inner backdrop-blur-md"
                         onKeyDown={(e) => {
                           if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
                             e.preventDefault();
-                            handleNextStep();
+                            handleSubmit();
                           }
                         }}
                       />
@@ -506,17 +501,27 @@ export default function HomePage() {
                   )}
 
                   <div className="mt-6 flex justify-between items-center">
-                    <span className="text-xs font-mono text-white/55 font-semibold">Step 1 of 2 · Discovery</span>
+                    <span className="text-xs font-mono text-white/55 font-semibold">Discovery Engine</span>
                     <button
-                      onClick={() => handleNextStep()}
-                      disabled={!intent.trim() || isRefining}
-                      className="px-6 py-3 bg-white text-black rounded-full text-sm font-semibold disabled:opacity-30 hover:bg-white/90 active:scale-95 transition-all shadow-[0_0_20px_rgba(255,255,255,0.12)] flex items-center gap-1.5"
+                      onClick={() => handleSubmit()}
+                      disabled={!intent.trim() || isRefining || submitting}
+                      className="px-6 py-3 bg-white text-black rounded-full text-sm font-semibold disabled:opacity-30 hover:bg-neutral-200 active:scale-95 transition-all shadow-[0_0_25px_rgba(255,255,255,0.2)] flex items-center gap-1.5"
                     >
-                      Configure Swarm <ArrowRight className="w-4 h-4" />
+                      {submitting ? (
+                        <>
+                          <RotateCw className="w-4 h-4 animate-spin" />
+                          Launching...
+                        </>
+                      ) : (
+                        <>
+                          <Compass className="w-4 h-4" />
+                          Launch Swarm →
+                        </>
+                      )}
                     </button>
                   </div>
 
-                  <div className="mt-8 flex flex-wrap gap-2 justify-center">
+                  <div className="mt-8 flex flex-wrap gap-3 justify-center">
                     {QUICK_INTENTS.map((q, idx) => {
                       const isShining = getWordCount(intent) >= 2 && !isPromptMeaningful(intent) && idx === shiningPillIndex;
                       return (
@@ -524,11 +529,10 @@ export default function HomePage() {
                           key={q.label}
                           disabled={submitting || isRefining}
                           onClick={() => setIntent(q.intent)}
-                          className={`px-4.5 py-2.5 rounded-xl text-sm font-medium transition-all disabled:opacity-30 ${
-                            isShining
-                              ? "border border-indigo-400 bg-indigo-500/15 text-indigo-200 shadow-[0_0_20px_rgba(99,102,241,0.35)] scale-105"
-                              : "border border-white/15 bg-white/[0.03] text-white/60 hover:border-white/30 hover:bg-white/[0.07] hover:text-white"
-                          }`}
+                          className={`px-5 py-2 rounded-full text-sm font-medium transition-all duration-200 disabled:opacity-30 ${isShining
+                              ? "border border-indigo-400/50 bg-indigo-500/10 text-indigo-200 shadow-[0_0_15px_rgba(99,102,241,0.2)] scale-105"
+                              : "border border-white/10 bg-white/5 text-white/70 hover:border-white/20 hover:bg-white/10 hover:text-white"
+                            }`}
                         >
                           {q.label}
                         </button>
@@ -537,10 +541,10 @@ export default function HomePage() {
                   </div>
 
                   <p className="mt-6 text-center text-white/35 text-xs font-mono font-medium">
-                    ⌘ + Enter to continue
+                    ⌘ + Enter to launch agent swarm
                   </p>
                 </motion.div>
-              ) : (
+                {/* ) : (
                 <motion.div
                   key="step2"
                   initial={{ opacity: 0, x: 15 }}
@@ -560,7 +564,7 @@ export default function HomePage() {
                     </p>
                   </div>
 
-                  {/* Smart Compliance/Logistics Directives */}
+                  {/* Smart Compliance/Logistics Directives *}
                   <div className="mb-6 p-4 rounded-xl border border-white/[0.08] bg-white/[0.02] hover:border-white/[0.15] transition-all">
                     <div className="flex justify-between items-center mb-3">
                       <p className="text-xs font-mono font-bold text-indigo-200/70 tracking-wide uppercase">Active Swarm Directives</p>
@@ -662,27 +666,27 @@ export default function HomePage() {
                     ⌘ + Enter to launch agent swarm
                   </p>
                 </motion.div>
-              )}
-            </AnimatePresence>
+              )} */}
+              </AnimatePresence>
 
-            {/* Reset DB Control */}
-            <motion.div
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              transition={{ delay: 0.7, duration: 0.5 }}
-              className="mt-12 flex justify-center"
-            >
-              <button
-                onClick={handleReset}
-                disabled={resetting || submitting}
-                className="text-[10px] text-white/40 hover:text-indigo-400 hover:bg-indigo-500/[0.05] border border-white/10 hover:border-indigo-500/20 px-3 py-1.5 rounded-lg transition-all font-mono disabled:opacity-30 flex items-center gap-1.5"
+              {/* Reset DB Control */}
+              <motion.div
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                transition={{ delay: 0.7, duration: 0.5 }}
+                className="mt-12 flex justify-center"
               >
-                <RotateCw className={`w-3 h-3 ${resetting ? "animate-spin" : ""}`} />
-                {resetting ? "Clearing database..." : resetDone ? "✓ database cleared" : "reset system database"}
-              </button>
-            </motion.div>
+                <button
+                  onClick={handleReset}
+                  disabled={resetting || submitting}
+                  className="text-[10px] text-white/40 hover:text-indigo-400 hover:bg-indigo-500/[0.05] border border-white/10 hover:border-indigo-500/20 px-3 py-1.5 rounded-lg transition-all font-mono disabled:opacity-30 flex items-center gap-1.5"
+                >
+                  <RotateCw className={`w-3 h-3 ${resetting ? "animate-spin" : ""}`} />
+                  {resetting ? "Clearing database..." : resetDone ? "✓ database cleared" : "reset system database"}
+                </button>
+              </motion.div>
             </div>
-          </BackgroundGradientAnimation>
+          </div>
         </motion.main>
       )}
     </AnimatePresence>

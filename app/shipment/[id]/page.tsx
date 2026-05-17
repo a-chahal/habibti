@@ -14,8 +14,7 @@ import InProgressRoutePanel from "@/components/InProgressRoutePanel";
 import HandoffAnimation from "@/components/HandoffAnimation";
 import AlertCard from "@/components/AlertCard";
 import EmailCard from "@/components/EmailCard";
-
-const WorldMap = dynamic(() => import("@/components/WorldMap"), { ssr: false });
+import { useMapStore } from "@/lib/stores/mapStore";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -609,6 +608,17 @@ export default function ShipmentPage({ params }: { params: { id: string } }) {
     ? { lat: shipment.vesselPosition.lat!, lng: shipment.vesselPosition.lng!, heading: shipment.vesselPosition.heading }
     : null;
 
+  useEffect(() => {
+    useMapStore.getState().setMapState({
+      arcs: mapArcs,
+      markers: mapMarkers,
+      mode: isInTransit ? "monitoring" : "sourcing",
+      activeArcId: activeArcId ?? undefined,
+      vesselPosition: vesselPos,
+      onArcClick: handleArcClick
+    });
+  }, [mapArcs, mapMarkers, isInTransit, activeArcId, vesselPos, handleArcClick]);
+
   return (
     <>
       {/* Mobile fallback */}
@@ -617,36 +627,30 @@ export default function ShipmentPage({ params }: { params: { id: string } }) {
       </div>
 
       {/* Desktop layout */}
-      <div className="hidden lg:flex flex-col h-screen bg-[#0a0e1a] text-white overflow-hidden">
+      <div className="hidden lg:flex flex-col h-screen bg-transparent text-white overflow-hidden pointer-events-none">
 
         {/* Header */}
-        <PhaseHeader
-          status={status}
-          currentEta={shipment.current_eta}
-          isPolling={isPolling}
-          lastError={lastError}
-          id={id}
-          belief={belief}
-        />
+        <div className="pointer-events-auto z-10 shrink-0">
+          <PhaseHeader
+            status={status}
+            currentEta={shipment.current_eta}
+            isPolling={isPolling}
+            lastError={lastError}
+            id={id}
+            belief={belief}
+          />
+        </div>
 
         {/* Main area */}
         <div className="flex flex-1 overflow-hidden relative">
 
           {/* Left: Agent panel (320px) */}
-          <div className="w-80 shrink-0 overflow-hidden">
+          <div className="w-80 shrink-0 overflow-hidden pointer-events-auto">
             <AgentPanel />
           </div>
 
           {/* Center: Map */}
-          <div className="flex-1 relative overflow-hidden bg-[#0a0a0a]">
-            <WorldMap
-              arcs={mapArcs}
-              markers={mapMarkers}
-              mode={isInTransit ? "monitoring" : "sourcing"}
-              activeArcId={activeArcId ?? undefined}
-              vesselPosition={vesselPos}
-              onArcClick={handleArcClick}
-            />
+          <div className="flex-1 relative overflow-hidden bg-transparent pointer-events-none">
 
             {/* Sourcing overlay */}
             {isSourceing && (
@@ -659,7 +663,7 @@ export default function ShipmentPage({ params }: { params: { id: string } }) {
 
             {/* Options overlay (Phase 2) */}
             {isSourcingComplete && shipment.options.length > 0 && (
-              <div className="absolute bottom-0 left-0 right-0 p-4 bg-gradient-to-t from-black/80 to-transparent">
+              <div className="absolute bottom-0 left-0 right-0 p-4 bg-gradient-to-t from-black/80 to-transparent pointer-events-auto">
                 <p className="text-xs text-white/40 font-mono mb-3 text-center">
                   {shipment.options.length} sourcing options · click an arc or card to explore
                 </p>
@@ -720,57 +724,67 @@ export default function ShipmentPage({ params }: { params: { id: string } }) {
 
         {/* Timeline bar — monitoring only */}
         {isInTransit && (
-          <TimelineBar progress={shipment.vesselPosition?.route_progress_pct ?? null} />
+          <div className="pointer-events-auto z-10 shrink-0">
+            <TimelineBar progress={shipment.vesselPosition?.route_progress_pct ?? null} />
+          </div>
         )}
       </div>
 
       {/* Route detail panel (slide-in from right) */}
       <AnimatePresence>
         {selectedOption && !handoffActive && (
-          <RouteDetailPanel
-            key={selectedOption.id}
-            option={selectedOption}
-            shipmentId={id}
-            onClose={() => setActiveArcId(null)}
-            onSelect={() => handleSelectOption(selectedOption.id)}
-            selecting={handoffActive}
-          />
+          <div className="pointer-events-auto z-20">
+            <RouteDetailPanel
+              key={selectedOption.id}
+              option={selectedOption}
+              shipmentId={id}
+              onClose={() => setActiveArcId(null)}
+              onSelect={() => handleSelectOption(selectedOption.id)}
+              selecting={handoffActive}
+            />
+          </div>
         )}
       </AnimatePresence>
 
       {/* In-progress candidate route detail panel */}
       <AnimatePresence>
         {selectedRouteSignal && (
-          <InProgressRoutePanel
-            key={selectedRouteSignal.id}
-            routeInfo={selectedRouteSignal}
-            onClose={() => setSelectedRouteSignal(null)}
-          />
+          <div className="pointer-events-auto z-20">
+            <InProgressRoutePanel
+              key={selectedRouteSignal.id}
+              routeInfo={selectedRouteSignal}
+              onClose={() => setSelectedRouteSignal(null)}
+            />
+          </div>
         )}
       </AnimatePresence>
 
       {/* Alert card (slide-in from right, monitoring only) */}
       <AnimatePresence>
         {isInTransit && firstAlert && !emailAlert && !selectedOption && (
-          <AlertCard
-            key={firstAlert.id}
-            alert={firstAlert}
-            previousEta={shipment.expected_eta}
-            currentEta={shipment.current_eta ?? belief?.current_eta}
-            onViewEmail={setEmailAlert}
-          />
+          <div className="pointer-events-auto z-20">
+            <AlertCard
+              key={firstAlert.id}
+              alert={firstAlert}
+              previousEta={shipment.expected_eta}
+              currentEta={shipment.current_eta ?? belief?.current_eta}
+              onViewEmail={setEmailAlert}
+            />
+          </div>
         )}
       </AnimatePresence>
 
       {/* Email card */}
       <AnimatePresence>
         {emailAlert && (
-          <EmailCard
-            key={emailAlert.id}
-            alert={emailAlert}
-            intentRaw={intentRaw}
-            onClose={() => setEmailAlert(null)}
-          />
+          <div className="pointer-events-auto z-30">
+            <EmailCard
+              key={emailAlert.id}
+              alert={emailAlert}
+              intentRaw={intentRaw}
+              onClose={() => setEmailAlert(null)}
+            />
+          </div>
         )}
       </AnimatePresence>
 
