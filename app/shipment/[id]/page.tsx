@@ -654,7 +654,7 @@ export default function ShipmentPage({ params }: { params: { id: string } }) {
 
             {/* Sourcing overlay */}
             {isSourceing && (
-              <div className="absolute bottom-6 left-1/2 -translate-x-1/2 flex flex-col items-center gap-2 pointer-events-none">
+              <div className="fixed bottom-6 left-1/2 -translate-x-1/2 flex flex-col items-center gap-2 pointer-events-none z-50">
                 <div className="px-4 py-2 bg-black/60 backdrop-blur rounded-full border border-white/10">
                   <span className="text-xs text-white/50 font-mono animate-pulse">{loadingMsg}</span>
                 </div>
