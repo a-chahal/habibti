@@ -1,107 +1,95 @@
-# Habibti — Agent-Native Trade Infrastructure Platform
+# habibti
 
-A 48-hour hackathon project: agentic trade intelligence for small importers.
+agent-native trade infrastructure for the long tail of importers.
 
-## Stack
-- **Next.js 14** (App Router) + TypeScript
-- **Postgres 16** in Docker (local only)
-- **Drizzle ORM** with full schema
-- **Tailwind CSS** + shadcn/ui (dark mode)
-- **OpenRouter** — Mercury 2, Sonnet 4.6, Opus 4.7
-- **EventEmitter3** — in-process pub/sub
-- **LRU Cache** + Postgres cache table
-- **MapLibre GL JS** + OpenFreeMap (no token)
-- **Framer Motion**
+## the agent layer
 
-## Quick Start
+every shipment runs through a directed graph of small specialist agents.
+each one owns a single decision — what to buy, where to ship from, what
+could go wrong — and publishes a typed signal the next agent reads. the
+orchestrator fans out 30+ dispatches per shipment and synthesises them
+into three ranked options. there is no single big model "doing sourcing";
+there is a swarm of mercury-2 agents, each cheap enough to spawn dozens at
+a time.
 
-```bash
-# 1. Install dependencies
-npm install
+the result is the same trade intelligence a global freight forwarder has
+on tap — surfaced for a single buyer of cinnamon, lithium cells, or
+denim. one importer plugged into the same global trade fabric the top
+0.1% already operate inside.
 
-# 2. Start Postgres
-npm run db:up
+## the agents
 
-# 3. Apply schema
-npm run db:push
+sourcing pipeline:
 
-# 4. Load sanctions data
-npm run load-sanctions
+    intent-parser         natural language → structured intent
+    country-discoverer    un comtrade volumes, sanctions pre-filter
+    tariff-calculator     federal register ustr + freight math
+    compliance-screener   ofac sdn + uflpa entity matching
+    supplier-verifier     gleif lei / uk companies house
+    country-risk          gdelt 30-day news window per origin
+    port-discoverer       picks top 3 ports per country from un/locode
+    route-planner         pure-code graph search through 14 maritime gates
+    leg-analyzer          per-leg gdelt 14d+90d anomaly, wave height vs
+                          climatology, ais traffic density, jwla war-risk
+                          zones, seasonal hazards, bunker fuel cost
+    freight-pricer        distance × rate + canal tolls + baf + war-risk
+    product-pricer        comtrade unit values × quantity
+    option-ranker         mercury reasons over the final three
 
-# 5. Verify all data sources
-npm run verify-sources
+post-confirmation monitoring:
 
-# 6. Test the agent framework
-npm run test-echo "hello world"
+    vessel-tracker · port-congestion · corridor-news · weather-hazard ·
+    regulatory-watcher · synthesizer
 
-# 7. Start the app
-npm run dev
-```
+## quick start
 
-## Scripts
+    npm install
+    npm run db:up
+    npm run db:push
+    npm run load-sanctions
+    npm run dev
 
-| Script | Description |
-|--------|-------------|
-| `npm run db:up` | Start Postgres container |
-| `npm run db:down` | Stop Postgres container |
-| `npm run db:reset` | Wipe and restart Postgres |
-| `npm run db:push` | Apply Drizzle schema |
-| `npm run load-sanctions` | Load OFAC SDN + UFLPA into DB |
-| `npm run verify-sources` | Verify all 10 data sources |
-| `npm run test-echo` | Run hello-world Mercury agent |
+open `http://localhost:3000` and try
 
-## Environment Variables
+    500 lithium batteries from china to la by aug 30, $80k
 
-Copy `.env` and fill in your keys (`.env` is gitignored):
+## connecting the world
 
-```
-DATABASE_URL=postgresql://postgres:postgres@localhost:5432/trade_platform
-OPENROUTER_API_KEY=...
-AISSTREAM_API_KEY=...
-UK_COMPANIES_HOUSE_API_KEY=...
-CURRENTS_API_KEY=...   # Rotate if expired (401)
-```
+the chokepoints registry covers suez, panama, malacca, hormuz, gibraltar,
+bab-el-mandeb, bosphorus, kiel, sunda, torres, taiwan strait, cape of good
+hope, cape horn. 13 ocean basins with explicit open-water adjacency force
+a shanghai→rotterdam route to physically traverse malacca + suez +
+gibraltar instead of cutting through asia. port resolution is a three-tier
+chain: a curated dict for major hubs, the full un/locode table, and
+mercury as a last-resort resolver — cached forever after the first hit.
 
-No key required: GDELT, UN Comtrade (public v1), Federal Register, GLEIF, Open-Meteo, OFAC SDN, UFLPA.
+## architecture
 
-## Data Sources
+    /lib
+      /agents     base class + specialist agents
+      /routing    chokepoints, basins, geometry, route-planner,
+                  war-risk zones, seasonal hazards
+      /sources    gdelt, comtrade, aisstream, openmeteo, ustr, gleif,
+                  companies-house, bunker, locations, sanctions
+      /db         drizzle schema + queries
+      /llm        openrouter client (mercury-2 by default)
+      /events     in-process pub/sub
+      /cache      lru + postgres two-tier
+    /app          next.js 14 app router + api routes
+    /components   three.js globe, agent panel, route detail
+    /scripts      load / test / verify utilities
 
-| Source | Status | Notes |
-|--------|--------|-------|
-| AISStream | ✅ | WebSocket, real-time vessel positions |
-| GDELT | ✅ | 5-sec rate limit between requests |
-| UN Comtrade | ✅ | Public v1, annual HS trade data |
-| USITC HTS | ⚠️ Fallback | REST API deprecated (SPA); use Federal Register |
-| Federal Register (USTR) | ✅ | Agency ID 491 |
-| Companies House (UK) | ✅ | Requires API key |
-| GLEIF | ✅ | LEI lookup, no key |
-| Open-Meteo Marine | ✅ | No key, 72h marine forecasts |
-| Local Sanctions | ✅ | ~19k OFAC + 59 UFLPA entities in Postgres |
-| Currents News | ⚠️ Fallback | Rotate CURRENTS_API_KEY if 401 |
+## env
 
-## Architecture
+    DATABASE_URL=postgresql://postgres:postgres@localhost:5432/trade_platform
+    OPENROUTER_API_KEY=
+    AISSTREAM_API_KEY=
+    UK_COMPANIES_HOUSE_API_KEY=
 
-```
-/lib
-  /db          — Drizzle schema (11 tables), client, query helpers
-  /llm         — OpenRouter client (Opus/Sonnet/Mercury tiers)
-  /events      — EventEmitter3 pub/sub with typed channels
-  /cache       — LRU + Postgres cache layer
-  /agents      — Base Agent class + specialist agents
-  /sources     — Thin clients for each external data source
+no key needed for gdelt, comtrade, federal register, gleif, open-meteo,
+ofac sdn, uflpa.
 
-/scripts
-  load-sanctions.ts   — OFAC + UFLPA ingestion
-  verify-sources.ts   — End-to-end source verification
-  test-echo.ts        — Hello-world agent test
+## stack
 
-/data/sanctions
-  uflpa.json   — Seeded UFLPA entity list (~59 entities)
-
-/docs
-  DATA_SOURCES.md   — Verified response shapes
-```
-
-## Database Schema (11 tables)
-
-`shipments` · `suppliers` · `signals` · `beliefs` · `alerts` · `options` · `dispatches` · `supplier_history` · `route_history` · `cache` · `sanctions_entities`
+next.js 14 · typescript · drizzle · postgres 16 · tailwind · framer motion
+· three.js · openrouter mercury-2 · eventemitter3
