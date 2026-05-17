@@ -161,6 +161,11 @@ export const IntentOutput = z.object({
   budget_usd: z.number().nullable().optional(),
   notes: z.string().nullable().optional().default(""),
   clarification_needed: z.string().nullable().optional(),
+  // Common-sense per-unit estimates so product-pricer doesn't have to guess from
+  // an HS-chapter-wide weight table. Mercury fills these from general knowledge.
+  unit_weight_kg_estimate: z.number().nullable().optional(),
+  unit_price_usd_estimate: z.number().nullable().optional(),
+  estimate_confidence: z.enum(["high", "medium", "low"]).nullable().optional(),
 });
 
 export type IntentOutput = z.infer<typeof IntentOutput>;
@@ -185,6 +190,31 @@ Given a user's natural-language shipment request, extract:
 - budget_usd: numeric USD budget (null if not specified). Parse "30K" as 30000, "1M" as 1000000.
 - notes: any other relevant information (empty string if none)
 - clarification_needed: string if the input is too vague to parse reliably, null otherwise
+- unit_weight_kg_estimate: rough per-unit weight in kg from general knowledge. Examples:
+  · pair of jeans → 0.6
+  · cotton t-shirt → 0.2
+  · pair of leather shoes → 0.8
+  · iPhone-class smartphone → 0.2
+  · laptop → 1.8
+  · solar panel (400W) → 22
+  · rattan chair → 7
+  · pair of car tires → 9
+  · 1 liter olive oil (bottled) → 1.0
+  · for commodities priced in kg/ton/MT, return 1 (already-per-kg)
+  Return null if you cannot reasonably estimate.
+- unit_price_usd_estimate: typical RETAIL or wholesale-per-piece USD price the importer
+  would realistically pay AT THIS QUANTITY. Use general knowledge of the market.
+  Small orders (< ~500 units): price closer to retail.
+  Large orders (≥ container): price closer to wholesale.
+  Examples:
+  · 10 pairs of selvedge denim jeans from Japan → ~120 (retail-ish)
+  · 10,000 pairs of basic jeans from Bangladesh → ~6 (wholesale)
+  · 1 lithium-ion 18650 cell from China → ~3
+  · 50,000 lithium-ion 18650 cells from China → ~1.5
+  · 1 rattan chair from Indonesia → ~80
+  · 1 kg green coffee beans from Ethiopia → ~5
+  Return null if you genuinely don't know.
+- estimate_confidence: "high" | "medium" | "low" — how sure you are about your weight/price estimates
 
 HS code hints:
 - Cotton fabric/textile → 5208 (woven cotton)

@@ -41,6 +41,9 @@ export default function RouteDetailPanel({
   const destPort = route?.destination_port ?? route?.destination ?? null;
   const legs: any[] = Array.isArray(route?.legs) ? route!.legs : [];
   const suppliers: any[] = Array.isArray(route?.suppliers) ? route!.suppliers : [];
+  const modality: "fcl" | "lcl" | "air" | undefined = route?.modality;
+  const modalityLabel: string | undefined = route?.modality_label;
+  const alternativeModalities: any[] = Array.isArray(route?.alternative_modalities) ? route!.alternative_modalities : [];
   const totalDistance = route?.total_distance_nm;
   const totalTransit = route?.total_transit_days ?? route?.typical_transit_days;
 
@@ -72,8 +75,17 @@ export default function RouteDetailPanel({
 
         {/* Header strip */}
         <div className="px-6 pt-6 pb-4 border-b border-white/5">
-          <div className="flex items-center gap-2 mb-3">
+          <div className="flex items-center gap-2 mb-3 flex-wrap">
             <span className="text-xs font-mono text-white/30">#{option?.rank}</span>
+            {modality && (
+              <span className={`text-[10px] px-2 py-0.5 rounded font-mono border ${
+                modality === "air" ? "bg-sky-900/50 text-sky-300 border-sky-700/40" :
+                modality === "lcl" ? "bg-indigo-900/50 text-indigo-300 border-indigo-700/40" :
+                "bg-teal-900/50 text-teal-300 border-teal-700/40"
+              }`}>
+                {modality === "air" ? "✈ AIR COURIER" : modality === "lcl" ? "⛴ SEA LCL" : "⛴ SEA FCL"}
+              </span>
+            )}
             <span className="text-xs text-white/50">
               {originPort?.locode ?? option?.country} → {destPort?.locode ?? "USLAX"}
             </span>
@@ -259,6 +271,53 @@ export default function RouteDetailPanel({
                 </div>
               )}
             </div>
+          </Section>
+        )}
+
+        {/* Modality comparison */}
+        {modality && (
+          <Section title={`Shipping Mode — ${modalityLabel ?? modality.toUpperCase()}`}>
+            <div className="text-xs text-white/55 leading-snug mb-2">
+              {modality === "air" && "Air courier (DHL/FedEx-class) — airport-to-airport, ~3-5 days. Best for small/urgent shipments."}
+              {modality === "lcl" && "Sea LCL — your cargo is consolidated with others into a shared container. Cheaper than FCL for small volumes, ~5-8 extra days for consolidation."}
+              {modality === "fcl" && "Sea FCL — you book the whole container. Lowest $/kg at scale, but wasteful below ~5,000 kg."}
+            </div>
+            {alternativeModalities.length > 0 && (
+              <>
+                <div className="text-[10px] font-mono text-white/30 uppercase tracking-widest mb-2">Alternatives evaluated</div>
+                <div className="space-y-2">
+                  {alternativeModalities.map((alt: any, i: number) => {
+                    const altStyle =
+                      alt.modality === "air" ? "text-sky-300/80" :
+                      alt.modality === "lcl" ? "text-indigo-300/80" :
+                      "text-teal-300/80";
+                    return (
+                      <div key={i} className="border-l-2 border-white/10 pl-3 py-1">
+                        <div className="flex items-center justify-between">
+                          <span className={`text-[11px] font-mono ${altStyle}`}>
+                            {alt.modality === "air" ? "✈ Air" : alt.modality === "lcl" ? "⛴ LCL" : "⛴ FCL"}
+                            {" · "}
+                            {alt.origin_code} → {alt.destination_code}
+                          </span>
+                          <span className="text-[11px] font-mono text-white/70">
+                            {fmt(alt.cost_usd)}
+                          </span>
+                        </div>
+                        <div className="flex items-center justify-between mt-0.5">
+                          <span className="text-[10px] text-white/40">{alt.transit_days}d transit</span>
+                          {alt.meets_deadline === false && (
+                            <span className="text-[10px] text-red-400/80">misses deadline</span>
+                          )}
+                        </div>
+                        {alt.reason_chosen_or_rejected && (
+                          <p className="text-[10px] text-white/40 italic mt-1 leading-snug">{alt.reason_chosen_or_rejected}</p>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              </>
+            )}
           </Section>
         )}
 

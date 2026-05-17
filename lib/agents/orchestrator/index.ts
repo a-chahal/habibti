@@ -31,8 +31,12 @@ import { OptionRankerAgent } from "../option-ranker";
 import type { OptionCandidate } from "../option-ranker";
 import { SupplierDiscovererAgent } from "../supplier-discoverer";
 import type { DiscoveredSupplier } from "../supplier-discoverer";
-import { planRoutes } from "../../routing/route-planner";
+import { SupplierPriceExtractorAgent } from "../supplier-price-extractor";
+import type { SupplierPriceExtractorOutput } from "../supplier-price-extractor";
+import { planRoutes, planAirRoute } from "../../routing/route-planner";
 import { resolvePortWithFallback } from "../../sources/locations";
+import { primaryAirportForCountry, nearestUSAirportForSeaport } from "../../routing/airports";
+import type { ModalityOption } from "../freight-pricer";
 import { FeedbackLoopAgent } from "../feedback-loop";
 import { SynthesizerAgent } from "../synthesizer";
 import { VesselTrackerAgent } from "../vessel-tracker";
@@ -761,6 +765,37 @@ class Orchestrator {
 
     console.log(`[Orchestrator] Phase 2d.5: suppliers found for ${suppliersByCountry.size}/${discoveryCountries.length} countries`);
 
+    // ── Phase 2d.6: Extract real prices from the supplier URLs (parallel per country) ──
+    const priceByCountry = new Map<string, SupplierPriceExtractorOutput>();
+    const extractionCountries = Array.from(suppliersByCountry.keys());
+    if (extractionCountries.length > 0) {
+      console.log(`[Orchestrator] Phase 2d.6: extracting supplier prices for ${extractionCountries.join(", ")}`);
+      await Promise.allSettled(
+        extractionCountries.map(async (cc) => {
+          const sups = suppliersByCountry.get(cc) ?? [];
+          if (sups.length === 0) return;
+          try {
+            const result = (await this.dispatchCapped("supplier-price-extractor", shipmentId, {
+              shipmentId,
+              country: cc,
+              hs_code: hsCode,
+              product_description: intent.product_description,
+              quantity: intent.quantity,
+              quantity_unit: intent.quantity_unit,
+              suppliers: sups,
+            }, 30_000)) as SupplierPriceExtractorOutput;
+            priceByCountry.set(cc, result);
+          } catch (err: any) {
+            console.error(`[Orchestrator] supplier-price-extractor failed for ${cc}:`, err.message);
+          }
+        })
+      );
+      const withPrices = Array.from(priceByCountry.values()).filter(
+        (p) => p.median_price_usd_per_unit != null
+      ).length;
+      console.log(`[Orchestrator] Phase 2d.6: real prices extracted for ${withPrices}/${extractionCountries.length} countries`);
+    }
+
     // ── Phase 2e: Per-leg + per-route analysis fan-out ──
     // Dedupe legs by chokepoint sequence so we don't analyse the same Suez→Gibraltar leg twice.
     const uniqueLegs = new Map<string, RouteCandidateRaw["route"]["legs"][number]>();
@@ -788,28 +823,68 @@ class Orchestrator {
         }
       }),
       // Product pricer per unique country (cache covers duplicates)
-      ...Array.from(new Set(routeCandidates.map((r) => r.cc))).map((cc) =>
-        this.dispatchCapped("product-pricer", shipmentId, {
+      ...Array.from(new Set(routeCandidates.map((r) => r.cc.toUpperCase()))).map((cc) => {
+        const extracted = priceByCountry.get(cc);
+        const realPrice = extracted?.median_price_usd_per_unit ?? null;
+        const priceSource = realPrice != null && extracted
+          ? `supplier listings (median of ${extracted.quotes.filter((q) => q.price_usd_per_unit != null).length} real quotes, $${extracted.low_price_usd_per_unit}-$${extracted.high_price_usd_per_unit}/unit)`
+          : null;
+        return this.dispatchCapped("product-pricer", shipmentId, {
           hs_code: hsCode,
           origin_country: cc,
           quantity: intent.quantity,
           quantity_unit: intent.quantity_unit,
           fallback_budget_usd: intent.budget_usd ?? undefined,
+          intent_unit_weight_kg: (intent as any).unit_weight_kg_estimate ?? null,
+          intent_unit_price_usd: (intent as any).unit_price_usd_estimate ?? null,
+          supplier_extracted_unit_price_usd: realPrice,
+          supplier_extractor_source: priceSource,
           shipmentId,
-        }).catch((err: any) => console.error(`[Orchestrator] product-pricer failed for ${cc}:`, err.message))
-      ),
+        }).catch((err: any) => console.error(`[Orchestrator] product-pricer failed for ${cc}:`, err.message));
+      }),
     ]);
 
-    // ── Phase 2f: Freight pricing (after leg analysis so we have all routes priced together) ──
+    // ── Phase 2f: Freight pricing — evaluates FCL/LCL/Air modalities per candidate ──
+    // Compute total cargo weight from intent estimates so freight-pricer can
+    // decide which modalities are viable.
+    const intentUnitKg = (intent as any).unit_weight_kg_estimate as number | null | undefined;
+    const cargoKg = typeof intentUnitKg === "number" && intentUnitKg > 0 && intent.quantity
+      ? intentUnitKg * Number(intent.quantity)
+      : null;
+    const deadlineDays = daysToDeadline;
+
+    // Pre-plan air routes per country (one per country, using primary airport →
+    // nearest US-side airport for the chosen destination seaport).
+    const destAirport = nearestUSAirportForSeaport(destPort.locode);
+    const airRouteByCountry = new Map<string, ReturnType<typeof planAirRoute> | null>();
+    for (const cc of new Set(routeCandidates.map((rc) => rc.cc.toUpperCase()))) {
+      const originAirport = primaryAirportForCountry(cc);
+      if (originAirport && destAirport) {
+        airRouteByCountry.set(
+          cc,
+          planAirRoute(
+            { locode: originAirport.iata, name: originAirport.name, lat: originAirport.lat, lon: originAirport.lon },
+            { locode: destAirport.iata, name: destAirport.name, lat: destAirport.lat, lon: destAirport.lon },
+          ),
+        );
+      } else {
+        airRouteByCountry.set(cc, null);
+      }
+    }
+
     const freightByCandidate = new Map<number, FreightEstimateOutput>();
     await Promise.allSettled(
       routeCandidates.map(async (rc, idx) => {
         try {
+          const air = airRouteByCountry.get(rc.cc.toUpperCase()) ?? null;
           const result = (await this.dispatchCapped("freight-pricer", shipmentId, {
             shipmentId,
-            route: rc.route,
+            sea_route: rc.route,
+            air_route: air,
             container_count: 1,
             container_type: "40ft",
+            cargo_kg: cargoKg,
+            deadline_days: deadlineDays,
           })) as FreightEstimateOutput;
           freightByCandidate.set(idx, result);
         } catch (err: any) {
@@ -818,94 +893,138 @@ class Orchestrator {
       })
     );
 
-    // ── Phase 3: Build OptionCandidate list and dispatch option-ranker ──
+    // ── Phase 3: Build OptionCandidate list — EXPAND by modality ──
+    // For each (country, port) sea candidate, freight-pricer returned a matrix
+    // of viable modalities (FCL/LCL/Air). We expand each into separate
+    // OptionCandidates so the ranker can pick across the whole matrix.
+    // To avoid duplicate air options per country (air uses primary airport
+    // regardless of seaport), we emit air once per country.
     const candidatesForRanker: OptionCandidate[] = [];
     const today = new Date();
     const allSignalsForLookup = await getSignalsForShipment(shipmentId);
     const tariffSignals = allSignalsForLookup.filter((s: any) => s.agent_name === "tariff-calculator");
     const productPriceSignals = allSignalsForLookup.filter((s: any) => s.agent_name === "product-pricer");
+    const airEmittedForCountry = new Set<string>();
+
+    function buildLegsWithAnalysis(legs: any[]) {
+      return legs.map((leg) => {
+        const key = `${Math.round(leg.from.lat)}_${Math.round(leg.from.lon)}_${Math.round(leg.to.lat)}_${Math.round(leg.to.lon)}_${leg.chokepoint_id ?? "openwater"}`;
+        const analysis = legAnalysisByKey.get(key);
+        return {
+          ...leg,
+          news_severity: analysis?.news_severity ?? "none",
+          weather_severity: analysis?.weather_severity ?? "none",
+          traffic_severity: analysis?.traffic_severity ?? "none",
+          risk_severity: analysis?.risk_severity ?? "none",
+          summary: analysis?.summary ?? null,
+        };
+      });
+    }
 
     for (let i = 0; i < routeCandidates.length; i++) {
       const rc = routeCandidates[i];
+      const freight = freightByCandidate.get(i);
+      if (!freight) continue;
+
       const tariff = (tariffSignals.find((s: any) =>
         (s.payload?.origin_country ?? "").toUpperCase() === rc.cc.toUpperCase()
       )?.payload ?? {}) as any;
       const productPrice = (productPriceSignals.find((s: any) =>
         (s.payload?.origin_country ?? "").toUpperCase() === rc.cc.toUpperCase()
       )?.payload as ProductPriceOutput | undefined);
-      const freight = freightByCandidate.get(i);
 
       const productValue = productPrice?.total_value_usd ?? productValueUsd;
       const dutyPct = Number(tariff.total_duty_pct ?? 0);
       const dutyUsd = Math.round(productValue * dutyPct / 100);
-      const freightUsd = freight?.base_freight_usd ?? 0;
-      const tollsUsd = freight?.canal_tolls_usd ?? 0;
-      const warRiskUsd = freight?.war_risk_premium_usd ?? 0;
-      const bafUsd = freight?.bunker_adjustment_usd ?? 0;
-      const insuranceUsd = Math.round(productValue * 0.005); // ~0.5% standard cargo insurance
+      const insuranceUsd = Math.round(productValue * 0.005);
       const brokerUsd = 250;
-      const totalLanded =
-        productValue + dutyUsd + freightUsd + tollsUsd + warRiskUsd + bafUsd + insuranceUsd + brokerUsd;
 
-      const legSummaries = rc.route.legs.map((leg) => {
-        const key = `${Math.round(leg.from.lat)}_${Math.round(leg.from.lon)}_${Math.round(leg.to.lat)}_${Math.round(leg.to.lon)}_${leg.chokepoint_id ?? "openwater"}`;
-        const analysis = legAnalysisByKey.get(key);
-        return {
-          summary: analysis?.summary ?? `${leg.from.name} → ${leg.to.name} (${leg.distance_nm}nm, ${leg.estimated_days}d)`,
-          severity: analysis?.risk_severity ?? "none",
-        };
-      });
+      const airRoute = airRouteByCountry.get(rc.cc.toUpperCase()) ?? null;
 
-      const eta = new Date(today.getTime() + rc.route.total_transit_days * 86_400_000);
+      for (const modalityOpt of freight.modalities as ModalityOption[]) {
+        // Don't emit air twice for the same country (one per seaport candidate would otherwise dupe)
+        if (modalityOpt.modality === "air") {
+          if (airEmittedForCountry.has(rc.cc.toUpperCase())) continue;
+          if (!airRoute) continue;
+          airEmittedForCountry.add(rc.cc.toUpperCase());
+        }
 
-      candidatesForRanker.push({
-        country_code: rc.cc,
-        country_name: rc.countryName,
-        origin_port: rc.port,
-        route_data: {
-          origin_port: { ...rc.port, why_this_port: rc.port.rationale },
-          destination_port: {
-            locode: destPort.locode,
-            name: destPort.name,
-            lat: destPort.lat,
-            lon: destPort.lng,
+        // Pick the route geometry for this modality
+        const variantRoute = modalityOpt.modality === "air" ? airRoute! : rc.route;
+        const variantOriginTerminal =
+          modalityOpt.modality === "air"
+            ? {
+                locode: variantRoute.origin_port.locode,
+                name: variantRoute.origin_port.name,
+                lat: variantRoute.origin_port.lat,
+                lon: variantRoute.origin_port.lon,
+                rationale: `Primary international airport for ${rc.countryName} (air courier)`,
+              }
+            : { ...rc.port, rationale: rc.port.rationale };
+        const variantDestTerminal =
+          modalityOpt.modality === "air"
+            ? {
+                locode: variantRoute.destination_port.locode,
+                name: variantRoute.destination_port.name,
+                lat: variantRoute.destination_port.lat,
+                lon: variantRoute.destination_port.lon,
+              }
+            : { locode: destPort.locode, name: destPort.name, lat: destPort.lat, lon: destPort.lng };
+
+        const totalLanded =
+          productValue + dutyUsd + modalityOpt.cost_usd + insuranceUsd + brokerUsd;
+        const eta = new Date(today.getTime() + variantRoute.total_transit_days * 86_400_000);
+
+        candidatesForRanker.push({
+          country_code: rc.cc,
+          country_name: rc.countryName,
+          origin_port: variantOriginTerminal as any,
+          route_data: {
+            origin_port: { ...variantOriginTerminal, why_this_port: variantOriginTerminal.rationale ?? "" },
+            destination_port: variantDestTerminal,
+            legs: buildLegsWithAnalysis(variantRoute.legs),
+            chokepoints: variantRoute.chokepoints,
+            transshipment_ports: variantRoute.transshipment_ports,
+            total_distance_nm: variantRoute.total_distance_nm,
+            total_transit_days: variantRoute.total_transit_days,
+            suppliers: suppliersByCountry.get(rc.cc.toUpperCase()) ?? [],
+            modality: modalityOpt.modality,
+            modality_label:
+              modalityOpt.modality === "fcl" ? "Sea — Full Container (FCL)" :
+              modalityOpt.modality === "lcl" ? "Sea — LCL Consolidated" :
+              "Air Courier",
+            alternative_modalities: freight.modalities.filter(
+              (m) => m.modality !== modalityOpt.modality
+            ),
           },
-          legs: rc.route.legs.map((leg) => {
+          cost_breakdown: {
+            product_value_usd: productValue,
+            base_duty_pct: tariff.base_duty_pct ?? null,
+            section_301_pct: tariff.section_301_pct ?? null,
+            section_232_pct: tariff.section_232_pct ?? null,
+            total_duty_pct: dutyPct,
+            freight_usd: modalityOpt.base_freight_usd,
+            canal_tolls_usd: modalityOpt.canal_tolls_usd,
+            war_risk_premium_usd: modalityOpt.war_risk_premium_usd,
+            insurance_usd: insuranceUsd,
+            broker_fee_usd: brokerUsd,
+            total_landed_cost_usd: totalLanded,
+          },
+          eta,
+          leg_summaries: variantRoute.legs.map((leg) => {
             const key = `${Math.round(leg.from.lat)}_${Math.round(leg.from.lon)}_${Math.round(leg.to.lat)}_${Math.round(leg.to.lon)}_${leg.chokepoint_id ?? "openwater"}`;
             const analysis = legAnalysisByKey.get(key);
             return {
-              ...leg,
-              news_severity: analysis?.news_severity ?? "none",
-              weather_severity: analysis?.weather_severity ?? "none",
-              traffic_severity: analysis?.traffic_severity ?? "none",
-              risk_severity: analysis?.risk_severity ?? "none",
-              summary: analysis?.summary ?? null,
+              summary: analysis?.summary ?? `${leg.from.name} → ${leg.to.name} (${leg.distance_nm}nm, ${leg.estimated_days}d)`,
+              severity: analysis?.risk_severity ?? "none",
             };
           }),
-          chokepoints: rc.route.chokepoints,
-          transshipment_ports: rc.route.transshipment_ports,
-          total_distance_nm: rc.route.total_distance_nm,
-          total_transit_days: rc.route.total_transit_days,
-          suppliers: suppliersByCountry.get(rc.cc.toUpperCase()) ?? [],
-        },
-        cost_breakdown: {
-          product_value_usd: productValue,
-          base_duty_pct: tariff.base_duty_pct ?? null,
-          section_301_pct: tariff.section_301_pct ?? null,
-          section_232_pct: tariff.section_232_pct ?? null,
-          total_duty_pct: dutyPct,
-          freight_usd: freightUsd,
-          canal_tolls_usd: tollsUsd,
-          war_risk_premium_usd: warRiskUsd,
-          insurance_usd: insuranceUsd,
-          broker_fee_usd: brokerUsd,
-          total_landed_cost_usd: totalLanded,
-        },
-        eta,
-        leg_summaries: legSummaries,
-        port_rationale: rc.port.rationale,
-      });
+          port_rationale: variantOriginTerminal.rationale ?? "",
+        });
+      }
     }
+
+    console.log(`[Orchestrator] Phase 3 assembly: ${candidatesForRanker.length} modality-expanded candidates (from ${routeCandidates.length} sea routes)`);
 
     const sourcing_ms = Date.now() - start;
     const agentNames = [
@@ -988,6 +1107,9 @@ export function registerAllAgents() {
   );
   orchestrator.register("supplier-discoverer", (payload) =>
     new SupplierDiscovererAgent().run(payload) as Promise<unknown>
+  );
+  orchestrator.register("supplier-price-extractor", (payload) =>
+    new SupplierPriceExtractorAgent().run(payload) as Promise<unknown>
   );
   orchestrator.register("country-risk", (payload) =>
     new CountryRiskAgent().run(payload) as Promise<unknown>

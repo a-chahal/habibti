@@ -303,3 +303,40 @@ export function planRoutes(
 
   return unique.slice(0, maxRoutes).map((s) => buildRoutePlan(s.path, nodeMap, origin, dest));
 }
+
+// --------------------------------------------------------------------------
+// Air route: single great-circle leg, no chokepoints, no graph search.
+// Used when modality is air courier. Commercial jets ~450 kn cruise.
+// --------------------------------------------------------------------------
+
+const AIR_CRUISE_KNOTS = 450;
+
+export function planAirRoute(origin: PortCoord, dest: PortCoord): RoutePlan {
+  const directNm = haversineNm(origin.lat, origin.lon, dest.lat, dest.lon);
+  // Air transit days: distance/speed + 1d handling on each end (customs, processing).
+  // Cap at 7d for very long haul; floor at 2d.
+  const flightHours = directNm / AIR_CRUISE_KNOTS;
+  const transitDays = Math.min(7, Math.max(2, Math.ceil(flightHours / 24 + 2)));
+
+  return {
+    origin_port: origin,
+    destination_port: dest,
+    legs: [
+      {
+        from: { locode: origin.locode, name: origin.name, lat: origin.lat, lon: origin.lon },
+        to: { locode: dest.locode, name: dest.name, lat: dest.lat, lon: dest.lon },
+        distance_nm: Math.round(directNm),
+        estimated_days: transitDays,
+        chokepoint_id: null,
+        waypoints: greatCircleWaypoints(origin.lat, origin.lon, dest.lat, dest.lon, 8),
+        bbox: legBbox(origin.lat, origin.lon, dest.lat, dest.lon),
+      },
+    ],
+    chokepoints: [],
+    transshipment_ports: [],
+    total_distance_nm: Math.round(directNm),
+    total_transit_days: transitDays,
+    canal_tolls_usd: 0,
+    score: directNm,
+  };
+}

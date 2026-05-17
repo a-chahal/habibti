@@ -671,6 +671,18 @@ export default function ShipmentPage({ params }: { params: { id: string } }) {
                   {shipment.options.map(opt => {
                     const cost = opt.cost_breakdown as any;
                     const risk = opt.risk_summary as any;
+                    const rd = opt.route_data as any;
+                    const modality = rd?.modality as ("fcl" | "lcl" | "air" | undefined);
+                    const modalityStyle =
+                      modality === "air" ? "bg-sky-900/50 text-sky-300 border-sky-700/40" :
+                      modality === "lcl" ? "bg-indigo-900/50 text-indigo-300 border-indigo-700/40" :
+                      modality === "fcl" ? "bg-teal-900/50 text-teal-300 border-teal-700/40" :
+                      "bg-slate-800 text-slate-400 border-slate-700";
+                    const modalityShort =
+                      modality === "air" ? "✈ AIR" :
+                      modality === "lcl" ? "⛴ LCL" :
+                      modality === "fcl" ? "⛴ FCL" : "";
+                    const transit = rd?.total_transit_days;
                     const isActive = activeArcId === opt.id;
                     return (
                       <button
@@ -683,7 +695,14 @@ export default function ShipmentPage({ params }: { params: { id: string } }) {
                         }`}
                       >
                         <div className="flex items-center justify-between mb-1">
-                          <span className="text-[10px] font-mono text-white/30">#{opt.rank}</span>
+                          <div className="flex items-center gap-1.5">
+                            <span className="text-[10px] font-mono text-white/30">#{opt.rank}</span>
+                            {modalityShort && (
+                              <span className={`text-[9px] px-1.5 py-0.5 rounded font-mono border ${modalityStyle}`}>
+                                {modalityShort}
+                              </span>
+                            )}
+                          </div>
                           <span className={`text-[10px] font-mono ${
                             risk?.overall === "high" ? "text-orange-400" :
                             risk?.overall === "medium" ? "text-yellow-400" :
@@ -693,13 +712,18 @@ export default function ShipmentPage({ params }: { params: { id: string } }) {
                           </span>
                         </div>
                         <div className="text-sm font-medium text-white/80 truncate">
-                          {opt.supplier?.name ?? `${opt.country} supplier`}
+                          {opt.country}{rd?.origin_port?.locode ? ` · ${rd.origin_port.locode}` : ""}
                         </div>
-                        {cost?.total_landed_cost_usd && (
-                          <div className="text-xs text-white/40 font-mono mt-0.5">
-                            ${(cost.total_landed_cost_usd as number).toLocaleString()}
-                          </div>
-                        )}
+                        <div className="flex items-center justify-between mt-0.5">
+                          {cost?.total_landed_cost_usd && (
+                            <span className="text-xs text-white/40 font-mono">
+                              ${(cost.total_landed_cost_usd as number).toLocaleString()}
+                            </span>
+                          )}
+                          {transit != null && (
+                            <span className="text-[10px] text-white/30 font-mono">{transit}d</span>
+                          )}
+                        </div>
                       </button>
                     );
                   })}

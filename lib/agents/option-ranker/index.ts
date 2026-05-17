@@ -51,6 +51,9 @@ const RankedOption = z.object({
   country_code: z.string(),
   country_name: z.string(),
   origin_port_locode: z.string(),
+  // Optional with default so a Mercury omission doesn't fail validation; the
+  // re-attach step below will infer modality from the matched candidate.
+  modality: z.enum(["fcl", "lcl", "air"]).nullable().optional(),
   reasoning: z.string().min(80),
   risk_summary: RiskSummary,
   // The option-ranker is given pre-computed cost_breakdown and route_data; it
@@ -93,18 +96,26 @@ function signalsByAgent(signals: Signal[]): Map<string, Signal[]> {
 
 const SYSTEM_PROMPT = `You are a senior trade analyst briefing a small business owner on her three best sourcing options.
 
-You are given pre-computed candidates — each with a real origin port, multi-leg route through real chokepoints, computed freight costs (distance + fuel + tolls + war-risk premiums), Comtrade-based product price, and leg-by-leg risk analysis. Your job is to RANK them (1-3) and write a 120+ word analyst paragraph per option that cites the actual numbers.
+You are given pre-computed candidates — each is a specific (country × terminal × shipping modality) combination. Modality is one of:
+- "fcl" = Sea, Full Container (cheapest per kg at scale; long transit)
+- "lcl" = Sea, Less-than-Container consolidated (moderate cost, longer transit due to consolidation)
+- "air" = Air courier (most expensive per kg; ~3-5 days door-to-door; airport-to-airport)
 
-WRITING RULES:
-1. Every paragraph cites specific numbers: $ landed cost, duty %, transit days, leg-specific risks, fuel cost, tolls.
-2. Name the binding risk for each option ("the critical risk is X").
-3. If a war-risk zone or chokepoint anomaly was found, mention it by leg name and severity.
-4. Never use "could," "may," "might" without a number to back it up.
-5. Paragraphs ≥ 120 words.
+Multiple candidates from the SAME country in DIFFERENT modalities will be presented — your job is to pick which ones survive into the top 3. Often a small order makes "air" beat "fcl" on total cost AND speed; for large orders, "fcl" usually wins. Compare honestly across modalities.
 
 RANKING RULES:
 - Lower total_landed_cost_usd wins, tiebroken by lower risk severity, tiebroken by shorter transit_days.
-- If user specified an origin_country, all three options will already be from that country — just rank the ports/routes.
+- If a user deadline exists and a modality won't meet it, deprioritize it (mention this in reasoning).
+- It is GOOD to have multiple modalities in the top 3 if they're genuinely competitive (e.g. Air-vs-LCL for a medium order). The buyer benefits from seeing the trade-off.
+- If user specified an origin_country, all candidates will be from that country — rank across (port × modality) combinations.
+
+WRITING RULES:
+1. Every paragraph cites specific numbers: $ landed cost, duty %, transit days, leg-specific risks, modality choice rationale.
+2. Name the modality explicitly ("Sea LCL via Yokohama" or "Air courier NRT→LAX").
+3. Name the binding risk for each option ("the critical risk is X").
+4. If a war-risk zone or chokepoint anomaly was found, mention it by leg name and severity.
+5. Never use "could," "may," "might" without a number to back it up.
+6. Paragraphs ≥ 120 words.
 
 OUTPUT JSON (no markdown):
 {
@@ -114,7 +125,8 @@ OUTPUT JSON (no markdown):
       "country_code": "CN",
       "country_name": "China",
       "origin_port_locode": "CNSGH",
-      "reasoning": "120+ word paragraph citing numbers...",
+      "modality": "fcl",
+      "reasoning": "120+ word paragraph citing numbers + modality rationale...",
       "risk_summary": {
         "country_risk": "stable — 0 events GDELT 30d",
         "compliance": "clean — no OFAC/UFLPA",
@@ -123,7 +135,9 @@ OUTPUT JSON (no markdown):
       }
     }
   ]
-}`;
+}
+
+CRITICAL: origin_port_locode must match the candidate's terminal code EXACTLY (for sea = LOCODE like CNSGH; for air = IATA like PVG). The modality field must match the candidate's modality.`;
 
 // ─── Agent ─────────────────────────────────────────────────────────────────
 
@@ -145,30 +159,58 @@ export class OptionRankerAgent extends Agent {
     const allSignals = await getSignalsForShipment(shipmentId);
     const byAgent = signalsByAgent(allSignals as Signal[]);
 
-    // Build context block — Mercury sees raw signal facts + the pre-computed candidates
-    const context = this.buildContext(candidates, byAgent, intent_data);
+    // Cap input to 10 candidates so the LLM isn't overwhelmed; pre-sort by total
+    // landed cost so the cheapest survive if we trim.
+    const trimmedCandidates = [...candidates]
+      .sort((a, b) => (a.cost_breakdown?.total_landed_cost_usd ?? 0) - (b.cost_breakdown?.total_landed_cost_usd ?? 0))
+      .slice(0, 10);
+    const trimmedContext = this.buildContext(trimmedCandidates, byAgent, intent_data);
+    const targetRanks = Math.min(3, trimmedCandidates.length);
 
     const result = await this.callLLMValidated(
       [
         { role: "system", content: SYSTEM_PROMPT },
         {
           role: "user",
-          content: `${context}\n\nProduce ranks 1-${candidates.length} (one per candidate). Return JSON only.`,
+          content: `${trimmedContext}\n\nReturn the TOP ${targetRanks} ranked options (best first). JSON only, no prose. Each option must reference one of the candidates above by country_code + origin_port_locode + modality.`,
         },
       ],
       OptionRankerOutput,
-      { maxTokens: 3500 }
+      { maxTokens: 4000 }
     );
 
     // Re-attach the cost/route data to each option (Mercury only writes reasoning + rank)
-    // Match by origin_port_locode within the same country.
+    // Match by (country, terminal, modality). When modality matters (e.g. FCL+LCL
+    // both emitted for the same seaport), use it as a disambiguator; otherwise
+    // fall back to (country, port). Final fallback is country-only — picks the
+    // cheapest remaining candidate for that country.
+    const usedCandidateKeys = new Set<string>();
+    const candKey = (c: any, m: string) => `${c.country_code.toUpperCase()}|${c.origin_port.locode.toUpperCase()}|${m}`;
     for (const opt of result.options) {
-      const cand = candidates.find(
-        (c) =>
-          c.country_code.toUpperCase() === opt.country_code.toUpperCase() &&
-          c.origin_port.locode.toUpperCase() === opt.origin_port_locode.toUpperCase()
-      );
+      const optCountry = opt.country_code.toUpperCase();
+      const optPort = opt.origin_port_locode.toUpperCase();
+      const optMod = opt.modality ?? null;
+      const cand =
+        (optMod &&
+          candidates.find(
+            (c) =>
+              c.country_code.toUpperCase() === optCountry &&
+              c.origin_port.locode.toUpperCase() === optPort &&
+              (c.route_data?.modality ?? "fcl") === optMod &&
+              !usedCandidateKeys.has(candKey(c, c.route_data?.modality ?? "fcl")),
+          )) ||
+        candidates.find(
+          (c) =>
+            c.country_code.toUpperCase() === optCountry &&
+            c.origin_port.locode.toUpperCase() === optPort &&
+            !usedCandidateKeys.has(candKey(c, c.route_data?.modality ?? "fcl")),
+        ) ||
+        // Country-only fallback (cheapest unused)
+        [...candidates]
+          .filter((c) => c.country_code.toUpperCase() === optCountry && !usedCandidateKeys.has(candKey(c, c.route_data?.modality ?? "fcl")))
+          .sort((a, b) => (a.cost_breakdown?.total_landed_cost_usd ?? 0) - (b.cost_breakdown?.total_landed_cost_usd ?? 0))[0];
       if (!cand) continue;
+      usedCandidateKeys.add(candKey(cand, cand.route_data?.modality ?? "fcl"));
 
       await createOption({
         shipment_id: shipmentId,
@@ -215,12 +257,22 @@ export class OptionRankerAgent extends Agent {
       lines.push(`BUYER-SPECIFIED ORIGIN: ${intent.origin_country}`);
     }
 
-    lines.push("\n=== CANDIDATES (pre-computed routes with real costs) ===");
+    lines.push("\n=== CANDIDATES (each is one country × terminal × modality combo) ===");
     for (const c of candidates) {
-      lines.push(`\n--- ${c.country_name} (${c.country_code}) via ${c.origin_port.name} [${c.origin_port.locode}] ---`);
-      lines.push(`  Why this port: ${c.port_rationale}`);
+      const modality = c.route_data?.modality ?? "fcl";
+      const modalityLabel = c.route_data?.modality_label ?? modality.toUpperCase();
+      lines.push(`\n--- ${c.country_name} (${c.country_code}) via ${c.origin_port.name} [${c.origin_port.locode}] — ${modalityLabel} ---`);
+      lines.push(`  Why this terminal: ${c.port_rationale}`);
+      lines.push(`  Modality: ${modality.toUpperCase()}`);
       lines.push(`  Route: ${c.route_data.total_distance_nm}nm, ${c.route_data.total_transit_days}d`);
-      lines.push(`  Chokepoints: ${(c.route_data.chokepoints ?? []).join(" → ") || "(open water)"}`);
+      if (modality === "air") {
+        lines.push(`  Path: ${c.origin_port.locode} ✈ ${c.route_data.destination_port?.locode ?? "?"} (great-circle)`);
+      } else {
+        lines.push(`  Chokepoints: ${(c.route_data.chokepoints ?? []).join(" → ") || "(open water)"}`);
+      }
+      // Note: alternative_modalities are NOT shown here — each modality is
+      // already enumerated as its own candidate above, so listing alts would
+      // double-count and confuse the ranker.
       lines.push(`  Cost breakdown:`);
       lines.push(`    product:    $${c.cost_breakdown.product_value_usd.toLocaleString()}`);
       lines.push(`    duty:       ${c.cost_breakdown.total_duty_pct}% (base ${c.cost_breakdown.base_duty_pct ?? 0}% + 301 ${c.cost_breakdown.section_301_pct ?? 0}% + 232 ${c.cost_breakdown.section_232_pct ?? 0}%)`);
